@@ -3,6 +3,8 @@ use base64::Engine;
 use image::ImageFormat;
 use xcap::Monitor;
 use tauri::{AppHandle, Manager, WebviewWindowBuilder, WebviewUrl, WebviewWindow};
+use image::ImageEncoder;
+
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -75,7 +77,7 @@ async fn finish_capture(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn capture_fullscreen() -> Result<String, String> {
+fn capture_fullscreen() -> Result<tauri::ipc::Response, String> {
     let monitors = Monitor::all().map_err(|e| e.to_string())?;
     // For now, just capture the first monitor. 
     // TODO: Support multiple monitors or specific monitor selection.
@@ -83,12 +85,22 @@ fn capture_fullscreen() -> Result<String, String> {
     let image = monitor.capture_image().map_err(|e| e.to_string())?;
 
     let mut bytes: Vec<u8> = Vec::new();
-    image
-        .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
+    
+    // Use fast compression to improve performance
+    let encoder = image::codecs::png::PngEncoder::new_with_quality(
+        &mut bytes,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::Paeth,
+    );
 
-    let base64_string = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:image/png;base64,{}", base64_string))
+    encoder.write_image(
+        image.as_raw(),
+        image.width(),
+        image.height(),
+        image::ColorType::Rgba8.into()
+    ).map_err(|e| e.to_string())?;
+
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[tauri::command]

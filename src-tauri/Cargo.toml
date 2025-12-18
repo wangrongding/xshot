@@ -26,4 +26,3 @@ xcap = "0.7.1"
 image = "0.25.9"
 base64 = "0.22.1"
 tauri-plugin-global-shortcut = "2.3.1"
-

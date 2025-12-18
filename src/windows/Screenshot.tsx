@@ -22,9 +22,14 @@ export default function ScreenshotWindow() {
         await getCurrentWindow().hide();
 
         // 调用 Rust 获取截图
-        const base64Image = await invoke<string>("capture_fullscreen");
+        const imageBytes = await invoke<ArrayBuffer>("capture_fullscreen");
         console.log("Screenshot captured successfully");
-        setImageSrc(base64Image);
+        const blob = new Blob([imageBytes], { type: "image/png" });
+        const url = URL.createObjectURL(blob);
+        setImageSrc((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return url;
+        });
       } catch (error) {
         console.error("Failed to capture screenshot:", error);
       }
