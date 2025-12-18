@@ -1,50 +1,33 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
+import { useEffect } from "react";
+import { registerShortcut } from "./logic/shortcut";
+import ScreenshotWindow from "./windows/Screenshot";
 import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import './App.css'
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+  const path = window.location.pathname;
+  console.log("Current path:", path);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+  if (path === "/screenshot") {
+    return <ScreenshotWindow />;
   }
 
+  // 主窗口逻辑（通常隐藏在托盘）
+  useEffect(() => {
+    registerShortcut();
+  }, []);
+
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+    <div className="container">
+      <h1>xshot Main Process</h1>
+      <p>Press <b>Alt + X</b> to take a screenshot.</p>
+      <p>The screenshot window is preloaded and hidden.</p>
+      <div style={{ marginTop: 20 }}>
+        <button onClick={() => invoke('open_devtools')}>Open Main DevTools</button>
+        <button onClick={() => invoke('open_screenshot_devtools')} style={{ marginLeft: 10 }}>Open Screenshot DevTools</button>
+        <p style={{ fontSize: 12, color: '#666' }}>Or press Cmd + Option + I</p>
       </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    </div>
   );
 }
 
