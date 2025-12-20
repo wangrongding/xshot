@@ -5,6 +5,8 @@ use image::ImageFormat;
 #[cfg(not(target_os = "macos"))]
 use xcap::Monitor;
 use tauri::{AppHandle, Manager, WebviewWindowBuilder, WebviewUrl, WebviewWindow};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 // 了解更多关于 Tauri 命令的信息：https://tauri.app/develop/calling-rust/
@@ -234,6 +236,29 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 ensure_screenshot_window(handle).await.unwrap();
             });
+
+            let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .show_menu_on_left_click(true)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .build(app)?;
+
             Ok(())
         })
         .on_window_event(|window, event| {
