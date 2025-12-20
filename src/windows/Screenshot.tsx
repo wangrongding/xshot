@@ -38,7 +38,41 @@ export default function ScreenshotWindow() {
     return () => { unlisten.then(f => f()); };
   }, []);
 
-  // 监听键盘事件：Esc 取消截图
+  // 完成截图（双击或回车）
+  const handleFinishCapture = async () => {
+    if (!rect || rect.w <= 0 || rect.h <= 0 || !canvasRef.current) return;
+
+    console.log("Capture finished, rect:", rect);
+    
+    try {
+      const ctx = canvasRef.current.getContext("2d");
+      if (!ctx) return;
+
+      // 获取选区内的像素数据
+      const imageData = ctx.getImageData(rect.x, rect.y, rect.w, rect.h);
+      // 转换为普通数组以便传递给 Rust
+      const pixels = Array.from(imageData.data);
+
+      await invoke("copy_to_clipboard", {
+        buffer: pixels,
+        width: Math.round(rect.w),
+        height: Math.round(rect.h),
+      });
+      console.log("Region copied to clipboard");
+    } catch (error) {
+      console.error("Failed to copy region to clipboard:", error);
+    }
+
+    // 6. 窗口释放与再生
+    await invoke("finish_capture");
+    
+    // 重置状态
+    setImageSrc(null);
+    setRect(null);
+    setStartPos(null);
+  };
+
+  // 监听键盘事件：Esc 取消截图, Enter 完成截图
   useEffect(() => {
     const handleKeyDown = async (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -49,6 +83,8 @@ export default function ScreenshotWindow() {
         setImageSrc(null);
         setRect(null);
         setStartPos(null);
+      } else if (e.key === "Enter") {
+        await handleFinishCapture();
       }
     };
 
@@ -56,7 +92,7 @@ export default function ScreenshotWindow() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, []);
+  }, [rect]); // 依赖 rect，确保能获取到最新的选区
 
   // 绘制逻辑：图片 + 遮罩 + 选区
   useEffect(() => {
@@ -129,19 +165,6 @@ export default function ScreenshotWindow() {
     // 选区确定
   };
 
-  // 完成截图（双击）
-  const handleDoubleClick = async () => {
-    // 这里可以添加保存图片/复制到剪贴板的逻辑
-    console.log("Capture finished, rect:", rect);
-    
-    // 6. 窗口释放与再生
-    await invoke("finish_capture");
-    
-    // 重置状态
-    setImageSrc(null);
-    setRect(null);
-  };
-
   if (!imageSrc) return <div className="text-white">Initializing...</div>;
 
   return (
@@ -151,7 +174,7 @@ export default function ScreenshotWindow() {
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
-      onDoubleClick={handleDoubleClick}
+      onDoubleClick={handleFinishCapture}
     />
   );
 }
