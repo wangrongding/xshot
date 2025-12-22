@@ -57,6 +57,7 @@ async fn ensure_screenshot_window(app: AppHandle) -> Result<(), String> {
         window
     };
 
+    // 确保截图窗口大小和位置正确（尤其是在多显示器环境下）
     #[cfg(target_os = "macos")]
     unsafe {
         use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior, NSEvent, NSScreen};
