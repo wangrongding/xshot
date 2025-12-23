@@ -48,33 +48,46 @@ export default function ScreenshotWindow() {
 
   // 截图完成逻辑
   const handleFinishCapture = async () => {
-      if (!selectionImgRef.current || !bgImgRef.current) return;
+      if (!selectionImgRef.current || !bgImgRef.current || !fabricCanvasRef.current) return;
       
+      const canvas = fabricCanvasRef.current;
       const selection = selectionImgRef.current;
-      // 使用源尺寸（裁剪尺寸）以保证高保真度
-      const sx = selection.cropX || 0;
-      const sy = selection.cropY || 0;
-      const sw = selection.width || 0;
-      const sh = selection.height || 0;
       
-      if (sw <= 0 || sh <= 0) return;
+      // 获取选区在 Canvas 上的视觉属性（逻辑像素）
+      const left = selection.left;
+      const top = selection.top;
+      const width = selection.getScaledWidth();
+      const height = selection.getScaledHeight();
       
-      console.log("Capture finished", { sx, sy, sw, sh });
+      if (width <= 0 || height <= 0) return;
       
       try {
-          const tempCanvas = document.createElement('canvas');
-          tempCanvas.width = sw;
-          tempCanvas.height = sh;
-          const ctx = tempCanvas.getContext('2d');
-          if (!ctx) return;
-          
-          const originalImage = bgImgRef.current.getElement() as HTMLImageElement;
-          ctx.drawImage(originalImage, sx, sy, sw, sh, 0, 0, sw, sh);
-          
-          const imageData = ctx.getImageData(0, 0, sw, sh);
-          // 优化：直接使用 Uint8Array 传递二进制数据，避免 Array.from 的巨大开销
-          const pixels = new Uint8Array(imageData.data.buffer);
-          
+          // 1. 临时隐藏选区边框，避免截取进去
+          const originalStrokeWidth = selection.strokeWidth;
+          selection.set('strokeWidth', 0);
+          canvas.requestRenderAll();
+
+          // 2. 使用 Fabric 的导出功能，直接截取 Canvas 上的选区内容（包含标注）
+          // multiplier: 1 默认会导出 Canvas 的物理分辨率（如果 enableRetinaScaling 为 true）
+          // 这样既保留了清晰度，又包含了所有图层（标注、底图等）
+          const blob = await canvas.toBlob({
+              left,
+              top,
+              width,
+              height,
+              format: 'png',
+              multiplier: 1, 
+          });
+
+          // 3. 恢复选区边框
+          selection.set('strokeWidth', originalStrokeWidth);
+          canvas.requestRenderAll();
+
+          if (!blob) return console.error("Failed to create blob");
+
+          // 4. Blob 转 Uint8Array
+          const arrayBuffer = await blob.arrayBuffer();
+          const pixels = new Uint8Array(arrayBuffer);
           await invoke("copy_to_clipboard", {
             blobData: pixels,
           });

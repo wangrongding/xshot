@@ -207,13 +207,19 @@ async fn capture_fullscreen(app: AppHandle) -> Result<tauri::ipc::Response, Stri
 
 
 #[tauri::command]
-async fn copy_to_clipboard(app: AppHandle, buffer: Vec<u8>, width: u32, height: u32) -> Result<(), String> {
-    // 创建 Image 对象 (假设前端传过来的是 RGBA 格式的原始像素数据)
-    let image = tauri::image::Image::new(&buffer, width, height);
+async fn copy_to_clipboard(app: AppHandle, blob_data: Vec<u8>) -> Result<(), String> {
+    // Decode the image from memory (detects format automatically, e.g. PNG)
+    let img = image::load_from_memory(&blob_data).map_err(|e| format!("Failed to decode image: {}", e))?;
+    
+    let width = img.width();
+    let height = img.height();
+    let rgba_img = img.to_rgba8();
+    let rgba_bytes = rgba_img.as_raw();
+
+    let image = tauri::image::Image::new(rgba_bytes, width, height);
     
     // 写入剪切板
     app.clipboard().write_image(&image).map_err(|e| format!("Failed to write to clipboard: {}", e))?;
-    
     Ok(())
 }
 
