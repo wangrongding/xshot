@@ -1,13 +1,13 @@
 #[cfg(not(target_os = "macos"))]
-use std::io::Cursor;
-#[cfg(not(target_os = "macos"))]
 use image::ImageFormat;
 #[cfg(not(target_os = "macos"))]
-use xcap::Monitor;
-use tauri::{AppHandle, Manager, WebviewWindowBuilder, WebviewUrl, WebviewWindow};
+use std::io::Cursor;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_clipboard_manager::ClipboardExt;
+#[cfg(not(target_os = "macos"))]
+use xcap::Monitor;
 
 // 了解更多关于 Tauri 命令的信息：https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -30,29 +30,25 @@ fn open_screenshot_devtools(app: AppHandle) {
 #[tauri::command]
 async fn ensure_screenshot_window(app: AppHandle) -> Result<(), String> {
     let label = "screenshot_window";
-    
+
     let window = if let Some(window) = app.get_webview_window(label) {
         // println!("Window already exists");
         window
     } else {
         println!("Creating new screenshot window...");
-        let window = WebviewWindowBuilder::new(
-            &app,
-            label,
-            WebviewUrl::App("/screenshot".into())
-        )
-        .title("Screenshot")
-        .visible(false)
-        .decorations(false)
-        .resizable(false)
-        .minimizable(false)
-        .maximizable(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        // .transparent(true) // 由于编译错误注释掉
-        .build()
-        .map_err(|e| e.to_string())?;
-        
+        let window = WebviewWindowBuilder::new(&app, label, WebviewUrl::App("/screenshot".into()))
+            .title("Screenshot")
+            .visible(false)
+            .decorations(false)
+            .resizable(false)
+            .minimizable(false)
+            .maximizable(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            // .transparent(true) // 由于编译错误注释掉
+            .build()
+            .map_err(|e| e.to_string())?;
+
         println!("Screenshot window created successfully");
         window
     };
@@ -60,14 +56,14 @@ async fn ensure_screenshot_window(app: AppHandle) -> Result<(), String> {
     // 确保截图窗口大小和位置正确（尤其是在多显示器环境下）
     #[cfg(target_os = "macos")]
     unsafe {
-        use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior, NSEvent, NSScreen};
-        use objc2_foundation::MainThreadMarker;
         use objc2::rc::Retained;
-        
+        use objc2_app_kit::{NSEvent, NSScreen, NSWindow, NSWindowCollectionBehavior};
+        use objc2_foundation::MainThreadMarker;
+
         let window_handle = window.clone();
         let _ = app.run_on_main_thread(move || {
             let _mtm = MainThreadMarker::new_unchecked();
-            
+
             // 获取鼠标位置
             let mouse_loc = NSEvent::mouseLocation();
             let screens = NSScreen::screens(_mtm);
@@ -78,10 +74,10 @@ async fn ensure_screenshot_window(app: AppHandle) -> Result<(), String> {
             for i in 0..count {
                 let screen = screens.objectAtIndex(i);
                 let frame = screen.frame();
-                if mouse_loc.x >= frame.origin.x 
-                    && mouse_loc.x < frame.origin.x + frame.size.width 
-                    && mouse_loc.y >= frame.origin.y 
-                    && mouse_loc.y < frame.origin.y + frame.size.height 
+                if mouse_loc.x >= frame.origin.x
+                    && mouse_loc.x < frame.origin.x + frame.size.width
+                    && mouse_loc.y >= frame.origin.y
+                    && mouse_loc.y < frame.origin.y + frame.size.height
                 {
                     target_screen = Some(screen);
                     break;
@@ -95,20 +91,20 @@ async fn ensure_screenshot_window(app: AppHandle) -> Result<(), String> {
             let ns_window = window_handle.ns_window().unwrap() as *mut std::ffi::c_void;
             // 转换为 *mut NSWindow 并保留它
             let ns_window = Retained::from_raw(ns_window as *mut NSWindow).unwrap();
-            
+
             // 移动窗口到目标屏幕并设置大小
             ns_window.setFrame_display(frame, true);
 
             // 设置层级为 NSStatusWindowLevel (25)
             ns_window.setLevel(25);
-            
+
             let behavior = ns_window.collectionBehavior();
             ns_window.setCollectionBehavior(
                 behavior
                     | NSWindowCollectionBehavior::CanJoinAllSpaces
                     | NSWindowCollectionBehavior::FullScreenAuxiliary,
             );
-            
+
             // 防止 Retained 包装器在超出作用域时释放窗口
             // 因为 Tauri 管理窗口生命周期
             let _ = Retained::into_raw(ns_window);
@@ -144,18 +140,18 @@ async fn capture_fullscreen(app: AppHandle) -> Result<tauri::ipc::Response, Stri
     let start_time = std::time::Instant::now();
     #[cfg(target_os = "macos")]
     {
-        use std::process::Command;
         use std::fs;
+        use std::process::Command;
 
         // 使用 screencapture 命令行工具
         // -x: 静音
         // -m: 仅主显示器 (如果需要多显示器，可能需要更复杂的逻辑或不加 -m)
         // -C: 包含光标 (可选，这里不加)
         // 默认包含菜单栏
-        
+
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join("xshot_capture.png");
-        
+
         let output = Command::new("screencapture")
             .arg("-x")
             .arg("-m") // 仅截取主屏幕，如果需要截取所有屏幕，可以去掉这个参数，但处理起来会更复杂
@@ -164,11 +160,15 @@ async fn capture_fullscreen(app: AppHandle) -> Result<tauri::ipc::Response, Stri
             .map_err(|e| format!("Failed to execute screencapture: {}", e))?;
 
         if !output.status.success() {
-            return Err(format!("screencapture failed: {}", String::from_utf8_lossy(&output.stderr)));
+            return Err(format!(
+                "screencapture failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
         }
 
-        let bytes = fs::read(&temp_file).map_err(|e| format!("Failed to read capture file: {}", e))?;
-        
+        let bytes =
+            fs::read(&temp_file).map_err(|e| format!("Failed to read capture file: {}", e))?;
+
         // 删除临时文件
         let _ = fs::remove_file(temp_file);
 
@@ -185,7 +185,7 @@ async fn capture_fullscreen(app: AppHandle) -> Result<tauri::ipc::Response, Stri
         let image = monitor.capture_image().map_err(|e| e.to_string())?;
 
         let mut bytes: Vec<u8> = Vec::new();
-        
+
         // 使用快速压缩以提高性能
         let encoder = image::codecs::png::PngEncoder::new_with_quality(
             &mut bytes,
@@ -193,33 +193,37 @@ async fn capture_fullscreen(app: AppHandle) -> Result<tauri::ipc::Response, Stri
             image::codecs::png::FilterType::Paeth,
         );
 
-        encoder.write_image(
-            image.as_raw(),
-            image.width(),
-            image.height(),
-            image::ColorType::Rgba8.into()
-        ).map_err(|e| e.to_string())?;
+        encoder
+            .write_image(
+                image.as_raw(),
+                image.width(),
+                image.height(),
+                image::ColorType::Rgba8.into(),
+            )
+            .map_err(|e| e.to_string())?;
 
         println!("Capture finished in {:?}", start_time.elapsed());
         Ok(tauri::ipc::Response::new(bytes))
     }
 }
 
-
 #[tauri::command]
 async fn copy_to_clipboard(app: AppHandle, blob_data: Vec<u8>) -> Result<(), String> {
     // Decode the image from memory (detects format automatically, e.g. PNG)
-    let img = image::load_from_memory(&blob_data).map_err(|e| format!("Failed to decode image: {}", e))?;
-    
+    let img = image::load_from_memory(&blob_data)
+        .map_err(|e| format!("Failed to decode image: {}", e))?;
+
     let width = img.width();
     let height = img.height();
     let rgba_img = img.to_rgba8();
     let rgba_bytes = rgba_img.as_raw();
 
     let image = tauri::image::Image::new(rgba_bytes, width, height);
-    
+
     // 写入剪切板
-    app.clipboard().write_image(&image).map_err(|e| format!("Failed to write to clipboard: {}", e))?;
+    app.clipboard()
+        .write_image(&image)
+        .map_err(|e| format!("Failed to write to clipboard: {}", e))?;
     Ok(())
 }
 
@@ -230,8 +234,8 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
-            greet, 
-            capture_fullscreen, 
+            greet,
+            capture_fullscreen,
             copy_to_clipboard,
             ensure_screenshot_window,
             finish_capture,

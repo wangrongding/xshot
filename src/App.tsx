@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { registerShortcut } from "./logic/shortcut";
 import ScreenshotWindow from "./windows/Screenshot";
 import { invoke } from "@tauri-apps/api/core";
-import './App.css'
+import "./App.css";
 
 function App() {
   const path = window.location.pathname;
@@ -20,12 +20,21 @@ function App() {
   return (
     <div className="container">
       <h1>xshot Main Process</h1>
-      <p>Press <b>Alt + X</b> to take a screenshot.</p>
+      <p>
+        Press <b>Alt + X</b> to take a screenshot.
+      </p>
       <p>The screenshot window is preloaded and hidden.</p>
       <div style={{ marginTop: 20 }}>
-        <button onClick={() => invoke('open_devtools')}>Open Main DevTools</button>
-        <button onClick={() => invoke('open_screenshot_devtools')} style={{ marginLeft: 10 }}>Open Screenshot DevTools</button>
-        <p style={{ fontSize: 12, color: '#666' }}>Or press Cmd + Option + I</p>
+        <button onClick={() => invoke("open_devtools")}>
+          Open Main DevTools
+        </button>
+        <button
+          onClick={() => invoke("open_screenshot_devtools")}
+          style={{ marginLeft: 10 }}
+        >
+          Open Screenshot DevTools
+        </button>
+        <p style={{ fontSize: 12, color: "#666" }}>Or press Cmd + Option + I</p>
       </div>
     </div>
   );
