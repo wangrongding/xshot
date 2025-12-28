@@ -4,6 +4,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as fabric from "fabric";
 
+// 设置截图窗口的透明背景(防止白色闪烁)
+if (typeof document !== "undefined") {
+  document.documentElement.style.backgroundColor = "transparent";
+  document.body.style.backgroundColor = "transparent";
+}
+
 export default function ScreenshotWindow() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fabricCanvasRef = useRef<fabric.Canvas | null>(null);

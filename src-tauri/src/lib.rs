@@ -45,7 +45,7 @@ async fn ensure_screenshot_window(app: AppHandle) -> Result<(), String> {
             .maximizable(false)
             .always_on_top(true)
             .skip_taskbar(true)
-            // .transparent(true) // 由于编译错误注释掉
+            .transparent(true)
             .build()
             .map_err(|e| e.to_string())?;
 
