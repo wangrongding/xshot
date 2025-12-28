@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as fabric from "fabric";
+import { cursorManager, ToolType } from "../logic/cursor";
 
 // 设置截图窗口的透明背景(防止白色闪烁)
 if (typeof document !== "undefined") {
@@ -21,6 +22,7 @@ export default function ScreenshotWindow() {
   // 逻辑状态
   const isDragging = useRef(false);
   const startPos = useRef<{ x: number; y: number } | null>(null);
+  const hasSelection = useRef(false);
 
   // 初始化 Fabric
   useEffect(() => {
@@ -37,6 +39,7 @@ export default function ScreenshotWindow() {
     canvas.setHeight(window.innerHeight);
 
     fabricCanvasRef.current = canvas;
+    cursorManager.bindCanvas(canvas);
 
     const handleResize = () => {
       if (fabricCanvasRef.current) {
@@ -48,6 +51,7 @@ export default function ScreenshotWindow() {
 
     return () => {
       window.removeEventListener("resize", handleResize);
+      cursorManager.unbindCanvas();
       canvas.dispose();
     };
   }, []);
@@ -113,6 +117,7 @@ export default function ScreenshotWindow() {
     canvas.clear();
     bgImgRef.current = null;
     selectionImgRef.current = null;
+    hasSelection.current = false;
   };
 
   // 设置事件
@@ -124,6 +129,10 @@ export default function ScreenshotWindow() {
       isDragging.current = true;
       const pointer = canvas.getPointer(opt.e);
       startPos.current = { x: pointer.x, y: pointer.y };
+
+      // 开始新选区时，重置状态和光标为十字准星光标
+      hasSelection.current = false;
+      cursorManager.setTool(ToolType.Selection);
 
       if (selectionImgRef.current) {
         selectionImgRef.current.visible = true;
@@ -170,6 +179,20 @@ export default function ScreenshotWindow() {
 
     const handleMouseUp = () => {
       isDragging.current = false;
+      updateCursor();
+    };
+
+    // 控制鼠标指针样式
+    const updateCursor = () => {
+      // 检查是否有有效选区，有则恢复正常鼠标指针
+      if (selectionImgRef.current && selectionImgRef.current.visible) {
+        const w = selectionImgRef.current.getScaledWidth();
+        const h = selectionImgRef.current.getScaledHeight();
+        if (w > 5 && h > 5) {
+          hasSelection.current = true;
+          cursorManager.setTool(ToolType.Select);
+        }
+      }
     };
 
     const handleDoubleClick = () => {
@@ -249,6 +272,10 @@ export default function ScreenshotWindow() {
 
           selectionImgRef.current = selectionImg;
           canvas.add(selectionImg);
+
+          // 初始化光标为选区工具
+          cursorManager.setTool(ToolType.Selection);
+          hasSelection.current = false;
 
           canvas.requestRenderAll();
 
