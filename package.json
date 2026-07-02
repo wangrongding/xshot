@@ -27,6 +27,7 @@
     "@tauri-apps/plugin-global-shortcut": "^2.3.1",
     "@tauri-apps/plugin-opener": "^2",
     "fabric": "^6.9.1",
+    "lucide-react": "^1.23.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

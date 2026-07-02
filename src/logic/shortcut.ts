@@ -1,38 +1,70 @@
-import { register } from "@tauri-apps/plugin-global-shortcut";
+import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import { emit } from "@tauri-apps/api/event";
-import { getAllWebviewWindows } from "@tauri-apps/api/webviewWindow";
+import { invoke } from "@tauri-apps/api/core";
 
-export async function registerShortcut() {
-  // 1. 注册快捷键 Alt+X
-  try {
-    await register("CommandOrControl+Alt+X", async (event) => {
-      if (event.state === "Pressed") {
-        console.log("Shortcut triggered!");
+export const DEFAULT_SHORTCUT = "CommandOrControl+Alt+X";
+const SHORTCUT_STORAGE_KEY = "xshot.shortcut";
 
-        // 2. 事件分发：通知截图窗口开始工作
-        // 这里我们找到截图窗口并显示它，同时发送开始信号
-        const windows = await getAllWebviewWindows();
-        console.log(
-          "All windows:",
-          windows.map((w) => w.label),
-        );
-        const screenshotWin = windows.find(
-          (w) => w.label === "screenshot_window",
-        );
+let registeredShortcut: string | null = null;
+let registrationQueue = Promise.resolve();
 
-        if (screenshotWin) {
-          console.log("Found screenshot window, starting capture...");
-          // 先发送事件，让窗口进行截图
-          // 注意：不要在这里 show()，否则会把白屏窗口也截进去
-          // 等截图完成后，由 ScreenshotWindow 自己调用 show()
-          await emit("start-capture");
-        } else {
-          console.error("Screenshot window not found!");
+function readStoredShortcut() {
+  if (typeof localStorage === "undefined") return DEFAULT_SHORTCUT;
+  return localStorage.getItem(SHORTCUT_STORAGE_KEY) || DEFAULT_SHORTCUT;
+}
+
+function writeStoredShortcut(shortcut: string) {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(SHORTCUT_STORAGE_KEY, shortcut);
+}
+
+export function getShortcut() {
+  return readStoredShortcut();
+}
+
+export async function startCapture() {
+  await invoke("ensure_screenshot_window");
+  await emit("start-capture");
+}
+
+async function registerAccelerator(shortcut: string) {
+  await register(shortcut, async (event) => {
+    if (event.state !== "Pressed") return;
+    console.log("Shortcut triggered:", shortcut);
+    await startCapture();
+  });
+}
+
+export async function registerShortcut(shortcut = readStoredShortcut()) {
+  const task = registrationQueue
+    .catch(() => undefined)
+    .then(async () => {
+      if (registeredShortcut === shortcut) return;
+
+      await registerAccelerator(shortcut);
+
+      if (registeredShortcut) {
+        try {
+          await unregister(registeredShortcut);
+        } catch (error) {
+          console.warn("Failed to unregister previous shortcut:", error);
         }
       }
+
+      registeredShortcut = shortcut;
+      console.log("Shortcut registered successfully:", shortcut);
     });
-    console.log("Shortcut CommandOrControl+Alt+X registered successfully");
+
+  registrationQueue = task.catch(() => undefined);
+  return task;
+}
+
+export async function setShortcut(shortcut: string) {
+  try {
+    await registerShortcut(shortcut);
+    writeStoredShortcut(shortcut);
   } catch (error) {
-    console.error("Failed to register shortcut CommandOrControl+Alt+X:", error);
+    console.error("Failed to set shortcut:", shortcut, error);
+    throw error;
   }
 }

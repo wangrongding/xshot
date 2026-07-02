@@ -1,34 +1,1102 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  ArrowUpRight,
+  Check,
+  Download,
+  Eraser,
+  Grid2X2,
+  ListOrdered,
+  Minus,
+  MousePointer2,
+  Paintbrush,
+  Palette,
+  Pencil,
+  Redo2,
+  Square,
+  Undo2,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 import * as fabric from "fabric";
 import { cursorManager, ToolType } from "../logic/cursor";
 
-// 设置截图窗口的透明背景(防止白色闪烁)
 if (typeof document !== "undefined") {
   document.documentElement.style.backgroundColor = "transparent";
   document.body.style.backgroundColor = "transparent";
 }
 
-export default function ScreenshotWindow() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const fabricCanvasRef = useRef<fabric.Canvas | null>(null);
+type Point = { x: number; y: number };
+type Bounds = { left: number; top: number; width: number; height: number };
+type ResizeHandle = "n" | "s" | "e" | "w" | "nw" | "ne" | "sw" | "se";
+type SelectionDragState =
+  | { mode: "new"; start: Point }
+  | { mode: "window"; start: Point; bounds: Bounds }
+  | { mode: "move"; start: Point; initial: Bounds }
+  | { mode: "resize"; start: Point; initial: Bounds; handle: ResizeHandle };
+type CaptureWindowRegion = Bounds & {
+  id: number;
+  title: string;
+  appName: string;
+  isFullscreenLike: boolean;
+  isOverlayCandidate: boolean;
+  isFocused: boolean;
+};
+type RawCaptureWindowRegion = {
+  id: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  monitor_width: number;
+  monitor_height: number;
+  is_fullscreen_like: boolean;
+  is_overlay_candidate: boolean;
+  is_focused: boolean;
+  title: string;
+  app_name: string;
+};
+type EditorTool =
+  | "select"
+  | "sequence"
+  | "mosaic-rect"
+  | "mosaic-brush"
+  | "pen"
+  | "eraser"
+  | "arrow"
+  | "rect"
+  | "line";
+type HistoryAction =
+  | { type: "add"; objects: fabric.Object[] }
+  | { type: "remove"; objects: fabric.Object[] };
 
-  // Fabric 对象引用
+const MIN_SELECTION_SIZE = 18;
+const STROKE_WIDTH = 4;
+const ERASER_SIZE = 22;
+const MOSAIC_BLOCK_SIZE = 10;
+const MOSAIC_STAMP_SIZE = 34;
+const SELECTION_HANDLE_SIZE = 9;
+const SELECTION_HANDLE_HIT_SIZE = 12;
+const SELECTION_EDGE_HIT_SIZE = 7;
+const TOOLBAR_MARGIN = 10;
+const DEFAULT_TOOLBAR_WIDTH = 560;
+const DEFAULT_TOOLBAR_HEIGHT = 54;
+const WINDOW_CLICK_DRAG_THRESHOLD = 5;
+const RESIZE_HANDLES: ResizeHandle[] = [
+  "nw",
+  "n",
+  "ne",
+  "e",
+  "se",
+  "s",
+  "sw",
+  "w",
+];
+
+const TOOL_BUTTONS: Array<{
+  tool: EditorTool;
+  title: string;
+  icon: LucideIcon;
+}> = [
+  { tool: "select", title: "Select area", icon: MousePointer2 },
+  { tool: "sequence", title: "Number marker", icon: ListOrdered },
+  { tool: "mosaic-rect", title: "Mosaic area", icon: Grid2X2 },
+  { tool: "mosaic-brush", title: "Mosaic brush", icon: Paintbrush },
+  { tool: "pen", title: "Pen", icon: Pencil },
+  { tool: "eraser", title: "Eraser", icon: Eraser },
+  { tool: "arrow", title: "Arrow", icon: ArrowUpRight },
+  { tool: "rect", title: "Rectangle", icon: Square },
+  { tool: "line", title: "Line", icon: Minus },
+];
+
+function normalizeBounds(start: Point, end: Point): Bounds {
+  return {
+    left: Math.min(start.x, end.x),
+    top: Math.min(start.y, end.y),
+    width: Math.abs(end.x - start.x),
+    height: Math.abs(end.y - start.y),
+  };
+}
+
+function clampBoundsToSelection(
+  bounds: Bounds,
+  selection: Bounds
+): Bounds | null {
+  const left = Math.max(bounds.left, selection.left);
+  const top = Math.max(bounds.top, selection.top);
+  const right = Math.min(
+    bounds.left + bounds.width,
+    selection.left + selection.width
+  );
+  const bottom = Math.min(
+    bounds.top + bounds.height,
+    selection.top + selection.height
+  );
+  const width = right - left;
+  const height = bottom - top;
+
+  if (width <= 0 || height <= 0) return null;
+  return { left, top, width, height };
+}
+
+function pointInBounds(point: Point, bounds: Bounds) {
+  return (
+    point.x >= bounds.left &&
+    point.x <= bounds.left + bounds.width &&
+    point.y >= bounds.top &&
+    point.y <= bounds.top + bounds.height
+  );
+}
+
+function getHandleCursor(handle: ResizeHandle) {
+  if (handle === "n" || handle === "s") return "ns-resize";
+  if (handle === "e" || handle === "w") return "ew-resize";
+  if (handle === "nw" || handle === "se") return "nwse-resize";
+  return "nesw-resize";
+}
+
+function getHandlePoint(handle: ResizeHandle, bounds: Bounds): Point {
+  const centerX = bounds.left + bounds.width / 2;
+  const centerY = bounds.top + bounds.height / 2;
+  const right = bounds.left + bounds.width;
+  const bottom = bounds.top + bounds.height;
+
+  const positions: Record<ResizeHandle, Point> = {
+    n: { x: centerX, y: bounds.top },
+    s: { x: centerX, y: bottom },
+    e: { x: right, y: centerY },
+    w: { x: bounds.left, y: centerY },
+    nw: { x: bounds.left, y: bounds.top },
+    ne: { x: right, y: bounds.top },
+    sw: { x: bounds.left, y: bottom },
+    se: { x: right, y: bottom },
+  };
+
+  return positions[handle];
+}
+
+function getResizeHandleAtPoint(
+  point: Point,
+  bounds: Bounds
+): ResizeHandle | null {
+  const cornerHandles: ResizeHandle[] = ["nw", "ne", "se", "sw"];
+  for (const handle of cornerHandles) {
+    const handlePoint = getHandlePoint(handle, bounds);
+    if (
+      Math.abs(point.x - handlePoint.x) <= SELECTION_HANDLE_HIT_SIZE &&
+      Math.abs(point.y - handlePoint.y) <= SELECTION_HANDLE_HIT_SIZE
+    ) {
+      return handle;
+    }
+  }
+
+  const right = bounds.left + bounds.width;
+  const bottom = bounds.top + bounds.height;
+  const withinX =
+    point.x >= bounds.left - SELECTION_EDGE_HIT_SIZE &&
+    point.x <= right + SELECTION_EDGE_HIT_SIZE;
+  const withinY =
+    point.y >= bounds.top - SELECTION_EDGE_HIT_SIZE &&
+    point.y <= bottom + SELECTION_EDGE_HIT_SIZE;
+
+  if (withinX && Math.abs(point.y - bounds.top) <= SELECTION_EDGE_HIT_SIZE) {
+    return "n";
+  }
+  if (withinX && Math.abs(point.y - bottom) <= SELECTION_EDGE_HIT_SIZE) {
+    return "s";
+  }
+  if (withinY && Math.abs(point.x - right) <= SELECTION_EDGE_HIT_SIZE) {
+    return "e";
+  }
+  if (withinY && Math.abs(point.x - bounds.left) <= SELECTION_EDGE_HIT_SIZE) {
+    return "w";
+  }
+
+  return null;
+}
+
+function clampMoveBounds(bounds: Bounds, canvas: fabric.Canvas): Bounds {
+  const maxLeft = Math.max(0, canvas.getWidth() - bounds.width);
+  const maxTop = Math.max(0, canvas.getHeight() - bounds.height);
+
+  return {
+    ...bounds,
+    left: Math.min(Math.max(0, bounds.left), maxLeft),
+    top: Math.min(Math.max(0, bounds.top), maxTop),
+  };
+}
+
+function clampPointToCanvas(point: Point, canvas: fabric.Canvas): Point {
+  return {
+    x: Math.min(Math.max(0, point.x), canvas.getWidth()),
+    y: Math.min(Math.max(0, point.y), canvas.getHeight()),
+  };
+}
+
+function computeResizeBounds(
+  handle: ResizeHandle,
+  initial: Bounds,
+  start: Point,
+  current: Point,
+  canvas: fabric.Canvas
+): Bounds {
+  const deltaX = current.x - start.x;
+  const deltaY = current.y - start.y;
+  let left = initial.left;
+  let top = initial.top;
+  let right = initial.left + initial.width;
+  let bottom = initial.top + initial.height;
+
+  if (handle.includes("w")) left += deltaX;
+  if (handle.includes("e")) right += deltaX;
+  if (handle.includes("n")) top += deltaY;
+  if (handle.includes("s")) bottom += deltaY;
+
+  left = Math.min(Math.max(0, left), canvas.getWidth());
+  right = Math.min(Math.max(0, right), canvas.getWidth());
+  top = Math.min(Math.max(0, top), canvas.getHeight());
+  bottom = Math.min(Math.max(0, bottom), canvas.getHeight());
+
+  if (right - left < MIN_SELECTION_SIZE) {
+    if (handle.includes("w")) left = right - MIN_SELECTION_SIZE;
+    else right = left + MIN_SELECTION_SIZE;
+  }
+
+  if (bottom - top < MIN_SELECTION_SIZE) {
+    if (handle.includes("n")) top = bottom - MIN_SELECTION_SIZE;
+    else bottom = top + MIN_SELECTION_SIZE;
+  }
+
+  if (left < 0) left = 0;
+  if (top < 0) top = 0;
+  if (right > canvas.getWidth()) right = canvas.getWidth();
+  if (bottom > canvas.getHeight()) bottom = canvas.getHeight();
+
+  return {
+    left,
+    top,
+    width: Math.max(MIN_SELECTION_SIZE, right - left),
+    height: Math.max(MIN_SELECTION_SIZE, bottom - top),
+  };
+}
+
+function makeArrowPath(start: Point, end: Point, color: string) {
+  const angle = Math.atan2(end.y - start.y, end.x - start.x);
+  const headLength = Math.max(14, STROKE_WIDTH * 4);
+  const headAngle = Math.PI / 7;
+  const headA = {
+    x: end.x - headLength * Math.cos(angle - headAngle),
+    y: end.y - headLength * Math.sin(angle - headAngle),
+  };
+  const headB = {
+    x: end.x - headLength * Math.cos(angle + headAngle),
+    y: end.y - headLength * Math.sin(angle + headAngle),
+  };
+
+  return new fabric.Path(
+    `M ${start.x} ${start.y} L ${end.x} ${end.y} M ${headA.x} ${headA.y} L ${end.x} ${end.y} L ${headB.x} ${headB.y}`,
+    {
+      fill: "",
+      stroke: color,
+      strokeLineCap: "round",
+      strokeLineJoin: "round",
+      strokeWidth: STROKE_WIDTH,
+      selectable: false,
+      evented: false,
+    }
+  );
+}
+
+function isAnnotation(object: fabric.Object) {
+  return (
+    (object as fabric.Object & { data?: { role?: string } }).data?.role ===
+    "annotation"
+  );
+}
+
+export default function ScreenshotWindow() {
+  const canvasElementRef = useRef<HTMLCanvasElement>(null);
+  const toolbarRef = useRef<HTMLDivElement | null>(null);
+  const fabricCanvasRef = useRef<fabric.Canvas | null>(null);
+  const sourceImageRef = useRef<HTMLImageElement | null>(null);
+  const sourceUrlRef = useRef<string | null>(null);
   const bgImgRef = useRef<fabric.FabricImage | null>(null);
   const selectionImgRef = useRef<fabric.FabricImage | null>(null);
+  const maskRef = useRef<fabric.Rect | null>(null);
+  const selectionBoundsRef = useRef<Bounds | null>(null);
+  const scaleRef = useRef(1);
+  const dragStartRef = useRef<Point | null>(null);
+  const selectionDragRef = useRef<SelectionDragState | null>(null);
+  const windowRegionsRef = useRef<CaptureWindowRegion[]>([]);
+  const hoverWindowRef = useRef<CaptureWindowRegion | null>(null);
+  const draftObjectRef = useRef<fabric.Object | null>(null);
+  const selectionHandleRefs = useRef<
+    Partial<Record<ResizeHandle, fabric.Rect>>
+  >({});
+  const isDraggingRef = useRef(false);
+  const activeToolRef = useRef<EditorTool>("select");
+  const strokeColorRef = useRef("#ff4d4f");
+  const markerColorRef = useRef("#1677ff");
+  const markerNumberRef = useRef(1);
+  const undoStackRef = useRef<HistoryAction[]>([]);
+  const redoStackRef = useRef<HistoryAction[]>([]);
+  const removedDuringStrokeRef = useRef<Set<fabric.Object>>(new Set());
+  const mosaicPromisesRef = useRef<Array<Promise<fabric.Object | null>>>([]);
 
-  // 逻辑状态
-  const isDragging = useRef(false);
-  const startPos = useRef<{ x: number; y: number } | null>(null);
-  const hasSelection = useRef(false);
+  const [activeTool, setActiveTool] = useState<EditorTool>("select");
+  const [selectionReady, setSelectionReady] = useState(false);
+  const [strokeColor, setStrokeColor] = useState("#ff4d4f");
+  const [markerColor, setMarkerColor] = useState("#1677ff");
+  const [historyRevision, setHistoryRevision] = useState(0);
+  const [toolbarPosition, setToolbarPosition] = useState<{
+    left: number;
+    top: number;
+  } | null>(null);
 
-  // 初始化 Fabric
+  const canUndo = historyRevision >= 0 && undoStackRef.current.length > 0;
+  const canRedo = historyRevision >= 0 && redoStackRef.current.length > 0;
+
   useEffect(() => {
-    if (!canvasRef.current) return;
+    activeToolRef.current = activeTool;
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
 
-    const canvas = new fabric.Canvas(canvasRef.current, {
+    canvas.isDrawingMode = activeTool === "pen";
+    if (activeTool === "pen") {
+      const brush = new fabric.PencilBrush(canvas);
+      brush.color = strokeColorRef.current;
+      brush.width = STROKE_WIDTH;
+      canvas.freeDrawingBrush = brush;
+      cursorManager.setTool(ToolType.Pen);
+      return;
+    }
+
+    if (activeTool === "select") {
+      cursorManager.setCursor(
+        selectionBoundsRef.current ? "default" : "crosshair"
+      );
+    } else if (activeTool === "eraser") cursorManager.setTool(ToolType.Eraser);
+    else cursorManager.setCursor("crosshair");
+  }, [activeTool]);
+
+  useEffect(() => {
+    strokeColorRef.current = strokeColor;
+    if (
+      fabricCanvasRef.current?.freeDrawingBrush &&
+      activeToolRef.current === "pen"
+    ) {
+      fabricCanvasRef.current.freeDrawingBrush.color = strokeColor;
+      fabricCanvasRef.current.freeDrawingBrush.width = STROKE_WIDTH;
+    }
+  }, [strokeColor]);
+
+  useEffect(() => {
+    markerColorRef.current = markerColor;
+  }, [markerColor]);
+
+  const bumpHistory = () => setHistoryRevision((value) => value + 1);
+
+  const pushHistory = (action: HistoryAction) => {
+    if (action.objects.length === 0) {
+      return;
+    }
+
+    undoStackRef.current.push(action);
+    redoStackRef.current = [];
+    bumpHistory();
+  };
+
+  const calculateToolbarPosition = (bounds: Bounds) => {
+    const toolbarWidth =
+      toolbarRef.current?.offsetWidth || DEFAULT_TOOLBAR_WIDTH;
+    const toolbarHeight =
+      toolbarRef.current?.offsetHeight || DEFAULT_TOOLBAR_HEIGHT;
+    const minLeft = toolbarWidth / 2 + TOOLBAR_MARGIN;
+    const maxLeft = window.innerWidth - toolbarWidth / 2 - TOOLBAR_MARGIN;
+    const center = bounds.left + bounds.width / 2;
+    const left =
+      maxLeft >= minLeft
+        ? Math.min(Math.max(center, minLeft), maxLeft)
+        : window.innerWidth / 2;
+    let top = bounds.top + bounds.height + 8;
+
+    if (top + toolbarHeight + TOOLBAR_MARGIN > window.innerHeight) {
+      top = bounds.top - toolbarHeight - 8;
+    }
+
+    top = Math.min(
+      Math.max(TOOLBAR_MARGIN, top),
+      Math.max(
+        TOOLBAR_MARGIN,
+        window.innerHeight - toolbarHeight - TOOLBAR_MARGIN
+      )
+    );
+
+    return { left, top };
+  };
+
+  const syncToolbarPosition = (bounds: Bounds) => {
+    const next = calculateToolbarPosition(bounds);
+    setToolbarPosition((current) => {
+      if (
+        current &&
+        Math.round(current.left) === Math.round(next.left) &&
+        Math.round(current.top) === Math.round(next.top)
+      ) {
+        return current;
+      }
+
+      return next;
+    });
+  };
+
+  const ensureSelectionHandles = () => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    RESIZE_HANDLES.forEach((handle) => {
+      if (selectionHandleRefs.current[handle]) return;
+
+      const rect = new fabric.Rect({
+        width: SELECTION_HANDLE_SIZE,
+        height: SELECTION_HANDLE_SIZE,
+        fill: "#ffffff",
+        stroke: "#1677ff",
+        strokeWidth: 1.5,
+        originX: "center",
+        originY: "center",
+        selectable: false,
+        evented: false,
+        visible: false,
+        objectCaching: false,
+      });
+      (
+        rect as fabric.Rect & { data?: { role: string; handle: ResizeHandle } }
+      ).data = {
+        role: "selection-handle",
+        handle,
+      };
+      selectionHandleRefs.current[handle] = rect;
+      canvas.add(rect);
+    });
+  };
+
+  const bringSelectionHandlesToFront = () => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    RESIZE_HANDLES.forEach((handle) => {
+      const object = selectionHandleRefs.current[handle];
+      if (object) canvas.bringObjectToFront(object);
+    });
+  };
+
+  const setSelectionHandlesVisible = (visible: boolean) => {
+    RESIZE_HANDLES.forEach((handle) => {
+      selectionHandleRefs.current[handle]?.set("visible", visible);
+    });
+  };
+
+  const syncSelectionHandles = (bounds: Bounds) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    ensureSelectionHandles();
+    RESIZE_HANDLES.forEach((handle) => {
+      const object = selectionHandleRefs.current[handle];
+      const point = getHandlePoint(handle, bounds);
+      object?.set({
+        left: point.x,
+        top: point.y,
+        visible: true,
+      });
+      object?.setCoords();
+    });
+    bringSelectionHandlesToFront();
+  };
+
+  const refreshAnnotationClipPaths = () => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    canvas.getObjects().forEach((object) => {
+      if (isAnnotation(object)) object.clipPath = makeSelectionClipPath();
+    });
+  };
+
+  const mapCaptureWindowsToCanvas = (
+    windows: RawCaptureWindowRegion[],
+    canvas: fabric.Canvas
+  ): CaptureWindowRegion[] => {
+    const canvasWidth = canvas.getWidth();
+    const canvasHeight = canvas.getHeight();
+
+    return windows
+      .map((window) => {
+        const scaleX = canvasWidth / window.monitor_width;
+        const scaleY = canvasHeight / window.monitor_height;
+
+        return {
+          id: window.id,
+          left: window.x * scaleX,
+          top: window.y * scaleY,
+          width: window.width * scaleX,
+          height: window.height * scaleY,
+          title: window.title,
+          appName: window.app_name,
+          isFullscreenLike: window.is_fullscreen_like,
+          isOverlayCandidate: window.is_overlay_candidate,
+          isFocused: window.is_focused,
+        };
+      })
+      .filter(
+        (window) =>
+          window.width >= MIN_SELECTION_SIZE &&
+          window.height >= MIN_SELECTION_SIZE
+      );
+  };
+
+  const getWindowAtPoint = (point: Point) =>
+    getBestWindowMatch(
+      point,
+      windowRegionsRef.current,
+      fabricCanvasRef.current
+    );
+
+  const getBestWindowMatch = (
+    point: Point,
+    windows: CaptureWindowRegion[],
+    canvas: fabric.Canvas | null
+  ) => {
+    const matches = windows.filter((window) => pointInBounds(point, window));
+    if (matches.length === 0) return null;
+    if (!canvas || matches.length === 1) return matches[0];
+
+    const canvasArea = canvas.getWidth() * canvas.getHeight();
+    const sortedMatches = [...matches].sort((a, b) => {
+      if (a.isOverlayCandidate !== b.isOverlayCandidate) {
+        return a.isOverlayCandidate ? 1 : -1;
+      }
+      if (a.isFocused !== b.isFocused) return a.isFocused ? -1 : 1;
+
+      const aArea = a.width * a.height;
+      const bArea = b.width * b.height;
+      const aIsWholeScreen = aArea / canvasArea >= 0.96;
+      const bIsWholeScreen = bArea / canvasArea >= 0.96;
+      if (aIsWholeScreen !== bIsWholeScreen) return aIsWholeScreen ? 1 : -1;
+
+      return aArea - bArea;
+    });
+
+    return sortedMatches[0];
+  };
+
+  const clearHoverWindowPreview = () => {
+    hoverWindowRef.current = null;
+    if (!selectionBoundsRef.current) {
+      selectionImgRef.current?.set("visible", false);
+      fabricCanvasRef.current?.requestRenderAll();
+    }
+  };
+
+  const makeSelectionClipPath = () => {
+    const bounds = selectionBoundsRef.current;
+    if (!bounds) return undefined;
+
+    const clip = new fabric.Rect({
+      left: bounds.left,
+      top: bounds.top,
+      width: bounds.width,
+      height: bounds.height,
+      selectable: false,
+      evented: false,
+    });
+    (
+      clip as fabric.Rect & { absolutePositioned?: boolean }
+    ).absolutePositioned = true;
+    return clip;
+  };
+
+  const markAnnotation = <T extends fabric.Object>(object: T) => {
+    object.set({
+      selectable: false,
+      evented: false,
+      objectCaching: false,
+    });
+    (object as T & { data?: { role: string } }).data = { role: "annotation" };
+    object.clipPath = makeSelectionClipPath();
+    return object;
+  };
+
+  const clearAnnotations = () => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    canvas.getObjects().forEach((object) => {
+      if (isAnnotation(object)) canvas.remove(object);
+    });
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    markerNumberRef.current = 1;
+    bumpHistory();
+  };
+
+  const resetEditor = () => {
+    const canvas = fabricCanvasRef.current;
+    canvas?.clear();
+    if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
+
+    sourceUrlRef.current = null;
+    sourceImageRef.current = null;
+    bgImgRef.current = null;
+    selectionImgRef.current = null;
+    maskRef.current = null;
+    selectionBoundsRef.current = null;
+    dragStartRef.current = null;
+    selectionDragRef.current = null;
+    windowRegionsRef.current = [];
+    hoverWindowRef.current = null;
+    draftObjectRef.current = null;
+    selectionHandleRefs.current = {};
+    isDraggingRef.current = false;
+    markerNumberRef.current = 1;
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    setToolbarPosition(null);
+    setSelectionReady(false);
+    setActiveTool("select");
+    bumpHistory();
+  };
+
+  const addAnnotation = (object: fabric.Object) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    markAnnotation(object);
+    canvas.add(object);
+    bringSelectionHandlesToFront();
+    canvas.requestRenderAll();
+    pushHistory({ type: "add", objects: [object] });
+  };
+
+  const createMosaicImage = async (bounds: Bounds) => {
+    const sourceImage = sourceImageRef.current;
+    if (!sourceImage) return null;
+
+    const scale = scaleRef.current;
+    const width = Math.max(1, Math.round(bounds.width));
+    const height = Math.max(1, Math.round(bounds.height));
+    const sourceX = Math.round(bounds.left / scale);
+    const sourceY = Math.round(bounds.top / scale);
+    const sourceWidth = Math.max(1, Math.round(bounds.width / scale));
+    const sourceHeight = Math.max(1, Math.round(bounds.height / scale));
+    const tiny = document.createElement("canvas");
+    const output = document.createElement("canvas");
+    const tinyContext = tiny.getContext("2d");
+    const outputContext = output.getContext("2d");
+
+    if (!tinyContext || !outputContext) return null;
+
+    tiny.width = Math.max(1, Math.ceil(width / MOSAIC_BLOCK_SIZE));
+    tiny.height = Math.max(1, Math.ceil(height / MOSAIC_BLOCK_SIZE));
+    output.width = width;
+    output.height = height;
+
+    tinyContext.imageSmoothingEnabled = true;
+    tinyContext.drawImage(
+      sourceImage,
+      sourceX,
+      sourceY,
+      sourceWidth,
+      sourceHeight,
+      0,
+      0,
+      tiny.width,
+      tiny.height
+    );
+    outputContext.imageSmoothingEnabled = false;
+    outputContext.drawImage(
+      tiny,
+      0,
+      0,
+      tiny.width,
+      tiny.height,
+      0,
+      0,
+      width,
+      height
+    );
+
+    const image = await fabric.FabricImage.fromURL(
+      output.toDataURL("image/png")
+    );
+    image.set({
+      left: bounds.left,
+      top: bounds.top,
+      selectable: false,
+      evented: false,
+    });
+
+    return markAnnotation(image);
+  };
+
+  const addMosaicBounds = async (bounds: Bounds) => {
+    const canvas = fabricCanvasRef.current;
+    const selection = selectionBoundsRef.current;
+    if (!canvas || !selection) return null;
+
+    const clampedBounds = clampBoundsToSelection(bounds, selection);
+    if (!clampedBounds) return null;
+
+    const image = await createMosaicImage(clampedBounds);
+    if (!image) return null;
+
+    canvas.add(image);
+    bringSelectionHandlesToFront();
+    canvas.requestRenderAll();
+    return image;
+  };
+
+  const addSequenceMarker = (point: Point) => {
+    const selection = selectionBoundsRef.current;
+    if (!selection || !pointInBounds(point, selection)) return;
+
+    const number = markerNumberRef.current;
+    markerNumberRef.current += 1;
+
+    const circle = new fabric.Circle({
+      left: 0,
+      top: 0,
+      radius: 13,
+      fill: markerColorRef.current,
+      originX: "center",
+      originY: "center",
+      selectable: false,
+      evented: false,
+    });
+    const label = new fabric.Text(String(number), {
+      left: 0,
+      top: 0,
+      fill: "#ffffff",
+      fontSize: number > 99 ? 10 : 14,
+      fontWeight: "700",
+      fontFamily: "Inter, Arial, sans-serif",
+      originX: "center",
+      originY: "center",
+      selectable: false,
+      evented: false,
+    });
+    const marker = new fabric.Group([circle, label], {
+      left: point.x,
+      top: point.y,
+      originX: "center",
+      originY: "center",
+      selectable: false,
+      evented: false,
+    });
+
+    addAnnotation(marker);
+  };
+
+  const eraseAt = (point: Point) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    const eraser = new fabric.Circle({
+      left: point.x - ERASER_SIZE / 2,
+      top: point.y - ERASER_SIZE / 2,
+      radius: ERASER_SIZE / 2,
+    });
+    const fabricPoint = new fabric.Point(point.x, point.y);
+    const targets = canvas
+      .getObjects()
+      .filter(
+        (object) =>
+          isAnnotation(object) &&
+          !removedDuringStrokeRef.current.has(object) &&
+          (object.intersectsWithObject(eraser) ||
+            object.containsPoint(fabricPoint))
+      );
+
+    targets.forEach((object) => {
+      removedDuringStrokeRef.current.add(object);
+      canvas.remove(object);
+    });
+
+    if (targets.length > 0) canvas.requestRenderAll();
+  };
+
+  const undo = () => {
+    const canvas = fabricCanvasRef.current;
+    const action = undoStackRef.current.pop();
+    if (!canvas || !action) return;
+
+    if (action.type === "add") {
+      action.objects.forEach((object) => canvas.remove(object));
+    } else {
+      action.objects.forEach((object) => canvas.add(object));
+      bringSelectionHandlesToFront();
+    }
+
+    redoStackRef.current.push(action);
+    canvas.requestRenderAll();
+    bumpHistory();
+  };
+
+  const redo = () => {
+    const canvas = fabricCanvasRef.current;
+    const action = redoStackRef.current.pop();
+    if (!canvas || !action) return;
+
+    if (action.type === "add") {
+      action.objects.forEach((object) => canvas.add(object));
+      bringSelectionHandlesToFront();
+    } else {
+      action.objects.forEach((object) => canvas.remove(object));
+    }
+
+    undoStackRef.current.push(action);
+    canvas.requestRenderAll();
+    bumpHistory();
+  };
+
+  const updateSelection = (
+    bounds: Bounds,
+    options: {
+      commit?: boolean;
+      showHandles?: boolean;
+      refreshClipPaths?: boolean;
+    } = {}
+  ) => {
+    const canvas = fabricCanvasRef.current;
+    const selectionImg = selectionImgRef.current;
+    if (!canvas || !selectionImg || !bgImgRef.current) return;
+
+    const scale = scaleRef.current;
+    selectionImg.set({
+      left: bounds.left,
+      top: bounds.top,
+      width: bounds.width / scale,
+      height: bounds.height / scale,
+      cropX: bounds.left / scale,
+      cropY: bounds.top / scale,
+      visible: true,
+    });
+
+    if (options.commit) {
+      selectionBoundsRef.current = bounds;
+      syncToolbarPosition(bounds);
+    }
+
+    if (options.showHandles) {
+      syncSelectionHandles(bounds);
+    }
+
+    if (options.refreshClipPaths) {
+      refreshAnnotationClipPaths();
+    }
+
+    canvas.requestRenderAll();
+  };
+
+  const finishSelection = (bounds: Bounds) => {
+    if (
+      bounds.width < MIN_SELECTION_SIZE ||
+      bounds.height < MIN_SELECTION_SIZE
+    ) {
+      selectionBoundsRef.current = null;
+      selectionImgRef.current?.set("visible", false);
+      setSelectionHandlesVisible(false);
+      setToolbarPosition(null);
+      setSelectionReady(false);
+      fabricCanvasRef.current?.requestRenderAll();
+      return;
+    }
+
+    const canvas = fabricCanvasRef.current;
+    const nextBounds = canvas ? clampMoveBounds(bounds, canvas) : bounds;
+    selectionBoundsRef.current = nextBounds;
+    updateSelection(nextBounds, {
+      commit: true,
+      showHandles: true,
+      refreshClipPaths: true,
+    });
+    setSelectionReady(true);
+    setActiveTool("select");
+    requestAnimationFrame(() => syncToolbarPosition(nextBounds));
+  };
+
+  const removeDraftObject = () => {
+    const canvas = fabricCanvasRef.current;
+    const object = draftObjectRef.current;
+    if (!canvas || !object) return;
+
+    canvas.remove(object);
+    draftObjectRef.current = null;
+  };
+
+  const renderDraftObject = (tool: EditorTool, start: Point, end: Point) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    removeDraftObject();
+
+    const bounds = normalizeBounds(start, end);
+    let object: fabric.Object | null = null;
+
+    if (tool === "rect") {
+      object = new fabric.Rect({
+        left: bounds.left,
+        top: bounds.top,
+        width: bounds.width,
+        height: bounds.height,
+        fill: "transparent",
+        stroke: strokeColorRef.current,
+        strokeWidth: STROKE_WIDTH,
+        selectable: false,
+        evented: false,
+      });
+    } else if (tool === "line") {
+      object = new fabric.Line([start.x, start.y, end.x, end.y], {
+        stroke: strokeColorRef.current,
+        strokeWidth: STROKE_WIDTH,
+        strokeLineCap: "round",
+        selectable: false,
+        evented: false,
+      });
+    } else if (tool === "arrow") {
+      object = makeArrowPath(start, end, strokeColorRef.current);
+    } else if (tool === "mosaic-rect") {
+      object = new fabric.Rect({
+        left: bounds.left,
+        top: bounds.top,
+        width: bounds.width,
+        height: bounds.height,
+        fill: "rgba(22, 119, 255, 0.14)",
+        stroke: "#1677ff",
+        strokeDashArray: [6, 4],
+        strokeWidth: 2,
+        selectable: false,
+        evented: false,
+      });
+    }
+
+    if (!object) return;
+
+    draftObjectRef.current = object;
+    canvas.add(object);
+    canvas.requestRenderAll();
+  };
+
+  const finishDraftObject = async (
+    tool: EditorTool,
+    start: Point,
+    end: Point
+  ) => {
+    const canvas = fabricCanvasRef.current;
+    const selection = selectionBoundsRef.current;
+    if (!canvas || !selection) return;
+
+    removeDraftObject();
+    const bounds = normalizeBounds(start, end);
+    if (bounds.width < 3 && bounds.height < 3) return;
+
+    if (tool === "mosaic-rect") {
+      const image = await addMosaicBounds(bounds);
+      if (image) pushHistory({ type: "add", objects: [image] });
+      return;
+    }
+
+    let object: fabric.Object;
+    if (tool === "rect") {
+      object = new fabric.Rect({
+        left: bounds.left,
+        top: bounds.top,
+        width: bounds.width,
+        height: bounds.height,
+        fill: "transparent",
+        stroke: strokeColorRef.current,
+        strokeWidth: STROKE_WIDTH,
+        selectable: false,
+        evented: false,
+      });
+    } else if (tool === "line") {
+      object = new fabric.Line([start.x, start.y, end.x, end.y], {
+        stroke: strokeColorRef.current,
+        strokeWidth: STROKE_WIDTH,
+        strokeLineCap: "round",
+        selectable: false,
+        evented: false,
+      });
+    } else {
+      object = makeArrowPath(start, end, strokeColorRef.current);
+    }
+
+    addAnnotation(object);
+  };
+
+  const exportSelectionBlob = async () => {
+    const canvas = fabricCanvasRef.current;
+    const selectionImg = selectionImgRef.current;
+    const bounds = selectionBoundsRef.current;
+    if (!canvas || !selectionImg || !bounds) return null;
+
+    const originalStrokeWidth = selectionImg.strokeWidth;
+    try {
+      selectionImg.set("strokeWidth", 0);
+      setSelectionHandlesVisible(false);
+      canvas.discardActiveObject();
+      canvas.requestRenderAll();
+
+      return await canvas.toBlob({
+        left: bounds.left,
+        top: bounds.top,
+        width: bounds.width,
+        height: bounds.height,
+        format: "png",
+        multiplier: 1,
+      });
+    } finally {
+      selectionImg.set("strokeWidth", originalStrokeWidth);
+      setSelectionHandlesVisible(true);
+      syncSelectionHandles(bounds);
+      canvas.requestRenderAll();
+    }
+  };
+
+  const closeCapture = async () => {
+    await invoke("finish_capture");
+    resetEditor();
+  };
+
+  const copyToClipboard = async () => {
+    const blob = await exportSelectionBlob();
+    if (!blob) return;
+
+    const arrayBuffer = await blob.arrayBuffer();
+    await invoke("copy_to_clipboard", {
+      blobData: new Uint8Array(arrayBuffer),
+    });
+    await closeCapture();
+  };
+
+  const downloadCapture = async () => {
+    const blob = await exportSelectionBlob();
+    if (!blob) return;
+
+    const arrayBuffer = await blob.arrayBuffer();
+    await invoke("save_to_downloads", {
+      blobData: new Uint8Array(arrayBuffer),
+    });
+    await closeCapture();
+  };
+
+  useEffect(() => {
+    if (!canvasElementRef.current) return;
+
+    const canvas = new fabric.Canvas(canvasElementRef.current, {
       selection: false,
       preserveObjectStacking: true,
       renderOnAddRemove: false,
@@ -40,273 +1108,559 @@ export default function ScreenshotWindow() {
 
     fabricCanvasRef.current = canvas;
     cursorManager.bindCanvas(canvas);
+    cursorManager.setTool(ToolType.Selection);
 
     const handleResize = () => {
-      if (fabricCanvasRef.current) {
-        fabricCanvasRef.current.setWidth(window.innerWidth);
-        fabricCanvasRef.current.setHeight(window.innerHeight);
-      }
+      canvas.setWidth(window.innerWidth);
+      canvas.setHeight(window.innerHeight);
     };
+
+    const handlePathCreated = (event: { path?: fabric.Object }) => {
+      const path = event.path;
+      const selection = selectionBoundsRef.current;
+      if (!path || !selection) return;
+
+      const bounds = path.getBoundingRect();
+      const intersects =
+        bounds.left < selection.left + selection.width &&
+        bounds.left + bounds.width > selection.left &&
+        bounds.top < selection.top + selection.height &&
+        bounds.top + bounds.height > selection.top;
+
+      if (!intersects) {
+        canvas.remove(path);
+        canvas.requestRenderAll();
+        return;
+      }
+
+      markAnnotation(path);
+      pushHistory({ type: "add", objects: [path] });
+      canvas.requestRenderAll();
+    };
+
     window.addEventListener("resize", handleResize);
+    canvas.on("path:created", handlePathCreated);
 
     return () => {
       window.removeEventListener("resize", handleResize);
+      canvas.off("path:created", handlePathCreated);
       cursorManager.unbindCanvas();
       canvas.dispose();
     };
   }, []);
 
-  // 截图完成逻辑
-  const handleFinishCapture = async () => {
-    if (
-      !selectionImgRef.current ||
-      !bgImgRef.current ||
-      !fabricCanvasRef.current
-    )
-      return;
-
-    const canvas = fabricCanvasRef.current;
-    const selection = selectionImgRef.current;
-
-    // 获取选区在 Canvas 上的视觉属性（逻辑像素）
-    const left = selection.left;
-    const top = selection.top;
-    const width = selection.getScaledWidth();
-    const height = selection.getScaledHeight();
-
-    if (width <= 0 || height <= 0) return;
-
-    try {
-      // 1. 临时隐藏选区边框，避免截取进去
-      const originalStrokeWidth = selection.strokeWidth;
-      selection.set("strokeWidth", 0);
-      canvas.requestRenderAll();
-
-      // 2. 使用 Fabric 的导出功能，直接截取 Canvas 上的选区内容（包含标注）
-      // multiplier: 1 默认会导出 Canvas 的物理分辨率（如果 enableRetinaScaling 为 true）
-      // 这样既保留了清晰度，又包含了所有图层（标注、底图等）
-      const blob = await canvas.toBlob({
-        left,
-        top,
-        width,
-        height,
-        format: "png",
-        multiplier: 1,
-      });
-
-      // 3. 恢复选区边框
-      selection.set("strokeWidth", originalStrokeWidth);
-      canvas.requestRenderAll();
-
-      if (!blob) return console.error("Failed to create blob");
-
-      // 4. Blob 转 Uint8Array
-      const arrayBuffer = await blob.arrayBuffer();
-      const pixels = new Uint8Array(arrayBuffer);
-      await invoke("copy_to_clipboard", {
-        blobData: pixels,
-      });
-      console.log("Region copied to clipboard");
-    } catch (error) {
-      console.error("Failed to copy:", error);
-    }
-
-    await invoke("finish_capture");
-
-    // 重置
-    canvas.clear();
-    bgImgRef.current = null;
-    selectionImgRef.current = null;
-    hasSelection.current = false;
-  };
-
-  // 设置事件
   useEffect(() => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
 
-    const handleMouseDown = (opt: any) => {
-      isDragging.current = true;
+    const handleMouseDown = (opt: fabric.TPointerEventInfo) => {
+      if (activeToolRef.current === "pen") return;
+
       const pointer = canvas.getPointer(opt.e);
-      startPos.current = { x: pointer.x, y: pointer.y };
+      const point = clampPointToCanvas({ x: pointer.x, y: pointer.y }, canvas);
+      const tool = activeToolRef.current;
+      const selection = selectionBoundsRef.current;
+      isDraggingRef.current = true;
+      dragStartRef.current = point;
 
-      // 开始新选区时，重置状态和光标为十字准星光标
-      hasSelection.current = false;
-      cursorManager.setTool(ToolType.Selection);
+      if (tool === "select") {
+        if (selection) {
+          const handle = getResizeHandleAtPoint(point, selection);
+          if (handle) {
+            selectionDragRef.current = {
+              mode: "resize",
+              start: point,
+              initial: { ...selection },
+              handle,
+            };
+            cursorManager.setCursor(getHandleCursor(handle));
+            return;
+          }
 
-      if (selectionImgRef.current) {
-        selectionImgRef.current.visible = true;
-        selectionImgRef.current.set({
-          cropX: 0,
-          cropY: 0,
-          width: 0,
-          height: 0,
-          left: pointer.x,
-          top: pointer.y,
-        });
-        canvas.requestRenderAll();
-      }
-    };
-
-    const handleMouseMove = (opt: any) => {
-      if (
-        !isDragging.current ||
-        !startPos.current ||
-        !selectionImgRef.current ||
-        !bgImgRef.current
-      )
-        return;
-      const pointer = canvas.getPointer(opt.e);
-
-      const x = Math.min(startPos.current.x, pointer.x);
-      const y = Math.min(startPos.current.y, pointer.y);
-      const w = Math.abs(pointer.x - startPos.current.x);
-      const h = Math.abs(pointer.y - startPos.current.y);
-
-      const scale = bgImgRef.current.scaleX || 1;
-
-      selectionImgRef.current.set({
-        left: x,
-        top: y,
-        width: w / scale,
-        height: h / scale,
-        cropX: x / scale,
-        cropY: y / scale,
-      });
-
-      canvas.requestRenderAll();
-    };
-
-    const handleMouseUp = () => {
-      isDragging.current = false;
-      updateCursor();
-    };
-
-    // 控制鼠标指针样式
-    const updateCursor = () => {
-      // 检查是否有有效选区，有则恢复正常鼠标指针
-      if (selectionImgRef.current && selectionImgRef.current.visible) {
-        const w = selectionImgRef.current.getScaledWidth();
-        const h = selectionImgRef.current.getScaledHeight();
-        if (w > 5 && h > 5) {
-          hasSelection.current = true;
-          cursorManager.setTool(ToolType.Select);
+          if (pointInBounds(point, selection)) {
+            selectionDragRef.current = {
+              mode: "move",
+              start: point,
+              initial: { ...selection },
+            };
+            cursorManager.setCursor("move");
+            return;
+          }
         }
+
+        const hoveredWindow = getWindowAtPoint(point);
+        if (!selection && hoveredWindow) {
+          selectionDragRef.current = {
+            mode: "window",
+            start: point,
+            bounds: { ...hoveredWindow },
+          };
+          cursorManager.setCursor("pointer");
+          return;
+        }
+
+        clearAnnotations();
+        selectionDragRef.current = { mode: "new", start: point };
+        hoverWindowRef.current = null;
+        setSelectionReady(false);
+        setToolbarPosition(null);
+        setSelectionHandlesVisible(false);
+        selectionBoundsRef.current = null;
+        updateSelection({ left: point.x, top: point.y, width: 0, height: 0 });
+        return;
+      }
+
+      if (!selection) {
+        isDraggingRef.current = false;
+        dragStartRef.current = null;
+        return;
+      }
+
+      if (!pointInBounds(point, selection)) {
+        isDraggingRef.current = false;
+        dragStartRef.current = null;
+        return;
+      }
+
+      if (tool === "sequence") {
+        isDraggingRef.current = false;
+        dragStartRef.current = null;
+        addSequenceMarker(point);
+      } else if (tool === "eraser") {
+        removedDuringStrokeRef.current = new Set();
+        eraseAt(point);
+      } else if (tool === "mosaic-brush") {
+        mosaicPromisesRef.current = [
+          addMosaicBounds({
+            left: point.x - MOSAIC_STAMP_SIZE / 2,
+            top: point.y - MOSAIC_STAMP_SIZE / 2,
+            width: MOSAIC_STAMP_SIZE,
+            height: MOSAIC_STAMP_SIZE,
+          }),
+        ];
+      } else {
+        renderDraftObject(tool, point, point);
       }
     };
 
-    const handleDoubleClick = () => {
-      handleFinishCapture();
+    const handleMouseMove = (opt: fabric.TPointerEventInfo) => {
+      if (activeToolRef.current === "pen") return;
+
+      const pointer = canvas.getPointer(opt.e);
+      const point = clampPointToCanvas({ x: pointer.x, y: pointer.y }, canvas);
+      const tool = activeToolRef.current;
+
+      if (!isDraggingRef.current || !dragStartRef.current) {
+        if (tool === "select") {
+          const selection = selectionBoundsRef.current;
+          if (!selection) {
+            const hoveredWindow = getWindowAtPoint(point);
+            if (hoveredWindow) {
+              hoverWindowRef.current = hoveredWindow;
+              updateSelection(hoveredWindow);
+              cursorManager.setCursor("pointer");
+            } else {
+              clearHoverWindowPreview();
+              cursorManager.setCursor("crosshair");
+            }
+            return;
+          }
+
+          const handle = getResizeHandleAtPoint(point, selection);
+          if (handle) cursorManager.setCursor(getHandleCursor(handle));
+          else if (pointInBounds(point, selection))
+            cursorManager.setCursor("move");
+          else cursorManager.setCursor("crosshair");
+        }
+        return;
+      }
+
+      if (tool === "select") {
+        const dragState = selectionDragRef.current;
+        if (!dragState) return;
+
+        if (dragState.mode === "new") {
+          updateSelection(normalizeBounds(dragState.start, point));
+          return;
+        }
+
+        if (dragState.mode === "window") {
+          const distance = Math.hypot(
+            point.x - dragState.start.x,
+            point.y - dragState.start.y
+          );
+
+          if (distance <= WINDOW_CLICK_DRAG_THRESHOLD) {
+            updateSelection(dragState.bounds);
+            return;
+          }
+
+          selectionDragRef.current = { mode: "new", start: dragState.start };
+          hoverWindowRef.current = null;
+          setSelectionReady(false);
+          setToolbarPosition(null);
+          setSelectionHandlesVisible(false);
+          selectionBoundsRef.current = null;
+          updateSelection(normalizeBounds(dragState.start, point));
+          cursorManager.setCursor("crosshair");
+          return;
+        }
+
+        if (dragState.mode === "move") {
+          const nextBounds = clampMoveBounds(
+            {
+              ...dragState.initial,
+              left: dragState.initial.left + point.x - dragState.start.x,
+              top: dragState.initial.top + point.y - dragState.start.y,
+            },
+            canvas
+          );
+          updateSelection(nextBounds, {
+            commit: true,
+            showHandles: true,
+            refreshClipPaths: true,
+          });
+          return;
+        }
+
+        const nextBounds = computeResizeBounds(
+          dragState.handle,
+          dragState.initial,
+          dragState.start,
+          point,
+          canvas
+        );
+        updateSelection(nextBounds, {
+          commit: true,
+          showHandles: true,
+          refreshClipPaths: true,
+        });
+        return;
+      }
+
+      if (!selectionBoundsRef.current) return;
+
+      if (tool === "eraser") {
+        eraseAt(point);
+      } else if (tool === "mosaic-brush") {
+        const lastStart = dragStartRef.current;
+        const distance = Math.hypot(
+          point.x - lastStart.x,
+          point.y - lastStart.y
+        );
+        if (distance < MOSAIC_STAMP_SIZE * 0.45) return;
+
+        dragStartRef.current = point;
+        mosaicPromisesRef.current.push(
+          addMosaicBounds({
+            left: point.x - MOSAIC_STAMP_SIZE / 2,
+            top: point.y - MOSAIC_STAMP_SIZE / 2,
+            width: MOSAIC_STAMP_SIZE,
+            height: MOSAIC_STAMP_SIZE,
+          })
+        );
+      } else {
+        renderDraftObject(tool, dragStartRef.current, point);
+      }
+    };
+
+    const handleMouseUp = (opt: fabric.TPointerEventInfo) => {
+      if (!isDraggingRef.current || activeToolRef.current === "pen") return;
+
+      const pointer = canvas.getPointer(opt.e);
+      const point = clampPointToCanvas({ x: pointer.x, y: pointer.y }, canvas);
+      const start = dragStartRef.current;
+      const tool = activeToolRef.current;
+      isDraggingRef.current = false;
+      dragStartRef.current = null;
+
+      if (!start) return;
+
+      if (tool === "select") {
+        const dragState = selectionDragRef.current;
+        selectionDragRef.current = null;
+
+        if (!dragState) return;
+
+        if (dragState.mode === "new") {
+          finishSelection(normalizeBounds(dragState.start, point));
+          return;
+        }
+
+        if (dragState.mode === "window") {
+          finishSelection(dragState.bounds);
+          hoverWindowRef.current = null;
+          cursorManager.setCursor("default");
+          return;
+        }
+
+        cursorManager.setCursor("default");
+        return;
+      }
+
+      if (!selectionBoundsRef.current) return;
+
+      if (tool === "eraser") {
+        const removedObjects = [...removedDuringStrokeRef.current];
+        removedDuringStrokeRef.current = new Set();
+        pushHistory({ type: "remove", objects: removedObjects });
+      } else if (tool === "mosaic-brush") {
+        const promises = [...mosaicPromisesRef.current];
+        mosaicPromisesRef.current = [];
+        void Promise.all(promises).then((objects) => {
+          pushHistory({
+            type: "add",
+            objects: objects.filter((object): object is fabric.Object =>
+              Boolean(object)
+            ),
+          });
+        });
+      } else {
+        void finishDraftObject(tool, start, point);
+      }
     };
 
     canvas.on("mouse:down", handleMouseDown);
     canvas.on("mouse:move", handleMouseMove);
     canvas.on("mouse:up", handleMouseUp);
-    canvas.on("mouse:dblclick", handleDoubleClick);
 
     return () => {
       canvas.off("mouse:down", handleMouseDown);
       canvas.off("mouse:move", handleMouseMove);
       canvas.off("mouse:up", handleMouseUp);
-      canvas.off("mouse:dblclick", handleDoubleClick);
     };
   }, []);
 
-  // 监听开始截图事件
   useEffect(() => {
     const unlisten = listen("start-capture", async () => {
-      console.log("Received start-capture event");
-
       try {
         await getCurrentWindow().hide();
+        resetEditor();
+
         const imageBytes = await invoke<ArrayBuffer>("capture_fullscreen");
         const blob = new Blob([imageBytes], { type: "image/png" });
         const url = URL.createObjectURL(blob);
+        sourceUrlRef.current = url;
 
-        if (fabricCanvasRef.current) {
-          const canvas = fabricCanvasRef.current;
-          canvas.clear();
+        const sourceImage = new Image();
+        sourceImage.src = url;
+        await sourceImage.decode();
+        sourceImageRef.current = sourceImage;
 
-          // 加载图片
-          const img = await fabric.FabricImage.fromURL(url);
+        const canvas = fabricCanvasRef.current;
+        if (!canvas) return;
 
-          // 计算缩放比例以适应窗口
-          const scale = canvas.getWidth() / img.width;
+        const img = await fabric.FabricImage.fromURL(url);
+        const scale = canvas.getWidth() / img.width;
+        scaleRef.current = scale;
+        const captureWindows = await invoke<RawCaptureWindowRegion[]>(
+          "list_capture_windows"
+        ).catch((error) => {
+          console.warn("Failed to list capture windows:", error);
+          return [];
+        });
+        windowRegionsRef.current = mapCaptureWindowsToCanvas(
+          captureWindows,
+          canvas
+        );
 
-          img.set({
-            left: 0,
-            top: 0,
-            scaleX: scale,
-            scaleY: scale,
-            selectable: false,
-            evented: false,
-          });
-          bgImgRef.current = img;
-          canvas.add(img);
+        img.set({
+          left: 0,
+          top: 0,
+          scaleX: scale,
+          scaleY: scale,
+          selectable: false,
+          evented: false,
+        });
+        bgImgRef.current = img;
+        canvas.add(img);
 
-          // 添加遮罩
-          const mask = new fabric.Rect({
-            left: 0,
-            top: 0,
-            width: canvas.getWidth(),
-            height: canvas.getHeight(),
-            fill: "rgba(0, 0, 0, 0.5)",
-            selectable: false,
-            evented: false,
-          });
-          canvas.add(mask);
+        const mask = new fabric.Rect({
+          left: 0,
+          top: 0,
+          width: canvas.getWidth(),
+          height: canvas.getHeight(),
+          fill: "rgba(0, 0, 0, 0.52)",
+          selectable: false,
+          evented: false,
+        });
+        maskRef.current = mask;
+        canvas.add(mask);
 
-          // 添加选区图片（克隆）
-          const selectionImg = await fabric.FabricImage.fromURL(url);
-          selectionImg.set({
-            left: 0,
-            top: 0,
-            scaleX: scale,
-            scaleY: scale,
-            selectable: false,
-            evented: false,
-            visible: false,
-            stroke: "#1677ff",
-            strokeWidth: 2 / scale,
-          });
+        const selectionImg = await fabric.FabricImage.fromURL(url);
+        selectionImg.set({
+          left: 0,
+          top: 0,
+          scaleX: scale,
+          scaleY: scale,
+          selectable: false,
+          evented: false,
+          visible: false,
+          stroke: "#1677ff",
+          strokeWidth: 2 / scale,
+        });
+        selectionImgRef.current = selectionImg;
+        canvas.add(selectionImg);
 
-          selectionImgRef.current = selectionImg;
-          canvas.add(selectionImg);
+        cursorManager.setTool(ToolType.Selection);
+        canvas.requestRenderAll();
 
-          // 初始化光标为选区工具
-          cursorManager.setTool(ToolType.Selection);
-          hasSelection.current = false;
-
-          canvas.requestRenderAll();
-
-          const win = getCurrentWindow();
-          await win.show();
-          await win.setFocus();
-        }
-      } catch (e) {
-        console.error(e);
+        const win = getCurrentWindow();
+        await win.show();
+        await win.setFocus();
+      } catch (error) {
+        console.error("Failed to start capture:", error);
       }
     });
 
     return () => {
-      unlisten.then((f) => f());
+      unlisten.then((dispose) => dispose());
     };
   }, []);
 
-  // 键盘事件
   useEffect(() => {
-    const handleKeyDown = async (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        const win = getCurrentWindow();
-        await win.hide();
-        if (fabricCanvasRef.current) fabricCanvasRef.current.clear();
-      } else if (e.key === "Enter") {
-        await handleFinishCapture();
+    const handleKeyDown = async (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        await closeCapture();
+      } else if (event.key === "Enter") {
+        await copyToClipboard();
+      } else if (
+        (event.metaKey || event.ctrlKey) &&
+        event.key.toLowerCase() === "z"
+      ) {
+        event.preventDefault();
+        if (event.shiftKey) redo();
+        else undo();
+      } else if (
+        (event.metaKey || event.ctrlKey) &&
+        event.key.toLowerCase() === "y"
+      ) {
+        event.preventDefault();
+        redo();
       }
     };
+
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  return <canvas ref={canvasRef} style={{ display: "block" }} />;
+  useEffect(() => {
+    if (!selectionReady || !selectionBoundsRef.current) return;
+    syncToolbarPosition(selectionBoundsRef.current);
+  }, [activeTool, historyRevision, markerColor, selectionReady, strokeColor]);
+
+  const toolbar = useMemo(
+    () =>
+      selectionReady ? (
+        <div
+          ref={toolbarRef}
+          className="capture-toolbar"
+          style={
+            toolbarPosition
+              ? {
+                  left: toolbarPosition.left,
+                  top: toolbarPosition.top,
+                }
+              : undefined
+          }
+        >
+          <div className="toolbar-group">
+            {TOOL_BUTTONS.map(({ tool, title, icon: Icon }) => (
+              <button
+                className={`tool-button${activeTool === tool ? " active" : ""}`}
+                key={tool}
+                type="button"
+                title={title}
+                onClick={() => setActiveTool(tool)}
+              >
+                <Icon size={18} />
+              </button>
+            ))}
+          </div>
+
+          <div className="toolbar-group">
+            <label className="color-button" title="Stroke color">
+              <Palette size={17} />
+              <input
+                type="color"
+                value={strokeColor}
+                onChange={(event) => setStrokeColor(event.target.value)}
+              />
+            </label>
+            <label className="color-button marker-color" title="Number color">
+              <ListOrdered size={17} />
+              <input
+                type="color"
+                value={markerColor}
+                onChange={(event) => setMarkerColor(event.target.value)}
+              />
+            </label>
+          </div>
+
+          <div className="toolbar-group">
+            <button
+              className="tool-button danger"
+              type="button"
+              title="Close"
+              onClick={() => void closeCapture()}
+            >
+              <X size={18} />
+            </button>
+            <button
+              className="tool-button"
+              type="button"
+              title="Undo"
+              disabled={!canUndo}
+              onClick={undo}
+            >
+              <Undo2 size={18} />
+            </button>
+            <button
+              className="tool-button"
+              type="button"
+              title="Redo"
+              disabled={!canRedo}
+              onClick={redo}
+            >
+              <Redo2 size={18} />
+            </button>
+          </div>
+
+          <div className="toolbar-group">
+            <button
+              className="tool-button"
+              type="button"
+              title="Download"
+              onClick={() => void downloadCapture()}
+            >
+              <Download size={18} />
+            </button>
+            <button
+              className="tool-button primary"
+              type="button"
+              title="Copy to clipboard"
+              onClick={() => void copyToClipboard()}
+            >
+              <Check size={18} />
+            </button>
+          </div>
+        </div>
+      ) : null,
+    [
+      activeTool,
+      canRedo,
+      canUndo,
+      markerColor,
+      selectionReady,
+      strokeColor,
+      toolbarPosition,
+    ]
+  );
+
+  return (
+    <div className="screenshot-root">
+      <canvas ref={canvasElementRef} className="screenshot-canvas" />
+      {toolbar}
+    </div>
+  );
 }

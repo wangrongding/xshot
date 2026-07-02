@@ -12,11 +12,15 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "xshot",
-        "width": 800,
-        "height": 600,
+        "width": 440,
+        "height": 260,
+        "center": true,
         "decorations": true,
-        "transparent": false
+        "resizable": false,
+        "transparent": false,
+        "visible": false
       }
     ],
     "security": {

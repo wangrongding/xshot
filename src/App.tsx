@@ -1,8 +1,101 @@
-import { useEffect } from "react";
-import { registerShortcut } from "./logic/shortcut";
+import { useEffect, useMemo, useState } from "react";
+import { Check, Keyboard, Play, RotateCcw } from "lucide-react";
+import {
+  DEFAULT_SHORTCUT,
+  getShortcut,
+  registerShortcut,
+  setShortcut,
+  startCapture,
+} from "./logic/shortcut";
 import ScreenshotWindow from "./windows/Screenshot";
-import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
+
+const MODIFIER_KEYS = new Set([
+  "Alt",
+  "AltGraph",
+  "CapsLock",
+  "Control",
+  "Fn",
+  "Meta",
+  "Shift",
+  "Super",
+]);
+
+function normalizeKey(key: string) {
+  if (/^[a-z]$/i.test(key)) return key.toUpperCase();
+  if (/^[0-9]$/.test(key)) return key;
+
+  const aliases: Record<string, string> = {
+    " ": "Space",
+    ArrowDown: "Down",
+    ArrowLeft: "Left",
+    ArrowRight: "Right",
+    ArrowUp: "Up",
+    Escape: "Esc",
+  };
+
+  return aliases[key] || key;
+}
+
+function keyFromPhysicalCode(code: string) {
+  const letter = code.match(/^Key([A-Z])$/);
+  if (letter) return letter[1];
+
+  const digit = code.match(/^Digit([0-9])$/);
+  if (digit) return digit[1];
+
+  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) return code;
+
+  const aliases: Record<string, string> = {
+    ArrowDown: "Down",
+    ArrowLeft: "Left",
+    ArrowRight: "Right",
+    ArrowUp: "Up",
+    Backspace: "Backspace",
+    Delete: "Delete",
+    End: "End",
+    Enter: "Enter",
+    Escape: "Esc",
+    Home: "Home",
+    Insert: "Insert",
+    PageDown: "PageDown",
+    PageUp: "PageUp",
+    Space: "Space",
+    Tab: "Tab",
+  };
+
+  return aliases[code] || null;
+}
+
+function shortcutKeyFromEvent(event: React.KeyboardEvent<HTMLInputElement>) {
+  return keyFromPhysicalCode(event.code) || normalizeKey(event.key);
+}
+
+function shortcutFromEvent(event: React.KeyboardEvent<HTMLInputElement>) {
+  if (MODIFIER_KEYS.has(event.key)) return null;
+
+  const key = shortcutKeyFromEvent(event);
+  const parts: string[] = [];
+  if (event.metaKey || event.ctrlKey) parts.push("CommandOrControl");
+  if (event.altKey) parts.push("Alt");
+  if (event.shiftKey) parts.push("Shift");
+  parts.push(key);
+
+  return parts.length > 1 ? parts.join("+") : null;
+}
+
+function formatShortcut(shortcut: string) {
+  const isMac = navigator.platform.toLowerCase().includes("mac");
+  const keyNames: Record<string, string> = {
+    Alt: isMac ? "Option" : "Alt",
+    CommandOrControl: isMac ? "Cmd" : "Ctrl",
+  };
+
+  return shortcut
+    .split("+")
+    .map((part) => keyNames[part] || part)
+    .join(" + ");
+}
 
 function App() {
   const path = window.location.pathname;
@@ -17,26 +110,97 @@ function App() {
     registerShortcut();
   }, []);
 
+  const [shortcut, setShortcutValue] = useState(getShortcut);
+  const [draftShortcut, setDraftShortcut] = useState(getShortcut);
+  const [isRecording, setIsRecording] = useState(false);
+  const [status, setStatus] = useState("");
+  const displayShortcut = useMemo(() => formatShortcut(shortcut), [shortcut]);
+
+  const saveShortcut = async () => {
+    if (!draftShortcut) return;
+
+    try {
+      await setShortcut(draftShortcut);
+      setShortcutValue(draftShortcut);
+      setStatus("Saved");
+      setIsRecording(false);
+    } catch {
+      setStatus("Shortcut unavailable");
+    }
+  };
+
+  const resetShortcut = async () => {
+    setDraftShortcut(DEFAULT_SHORTCUT);
+    try {
+      await setShortcut(DEFAULT_SHORTCUT);
+      setShortcutValue(DEFAULT_SHORTCUT);
+      setStatus("Reset");
+      setIsRecording(false);
+    } catch {
+      setStatus("Shortcut unavailable");
+    }
+  };
+
   return (
-    <div className="container">
-      <h1>xshot Main Process</h1>
-      <p>
-        Press <b>Alt + X</b> to take a screenshot.
-      </p>
-      <p>The screenshot window is preloaded and hidden.</p>
-      <div style={{ marginTop: 20 }}>
-        <button onClick={() => invoke("open_devtools")}>
-          Open Main DevTools
-        </button>
-        <button
-          onClick={() => invoke("open_screenshot_devtools")}
-          style={{ marginLeft: 10 }}
-        >
-          Open Screenshot DevTools
-        </button>
-        <p style={{ fontSize: 12, color: "#666" }}>Or press Cmd + Option + I</p>
+    <main className="settings-shell">
+      <div className="settings-panel">
+        <div className="settings-header">
+          <div>
+            <h1>xshot</h1>
+            <p>{displayShortcut}</p>
+          </div>
+          <button
+            className="icon-button primary"
+            type="button"
+            onClick={() => startCapture()}
+            title="Start capture"
+          >
+            <Play size={18} />
+          </button>
+        </div>
+
+        <section className="settings-section">
+          <label htmlFor="shortcut-input">Shortcut</label>
+          <div className="shortcut-row">
+            <div className="shortcut-input-wrap">
+              <Keyboard size={18} />
+              <input
+                id="shortcut-input"
+                value={formatShortcut(draftShortcut)}
+                readOnly
+                onFocus={() => setIsRecording(true)}
+                onKeyDown={(event) => {
+                  event.preventDefault();
+                  const nextShortcut = shortcutFromEvent(event);
+                  if (nextShortcut) {
+                    setDraftShortcut(nextShortcut);
+                    setStatus("");
+                  }
+                }}
+                placeholder={isRecording ? "Press shortcut" : ""}
+              />
+            </div>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={saveShortcut}
+              title="Save shortcut"
+            >
+              <Check size={18} />
+            </button>
+            <button
+              className="icon-button"
+              type="button"
+              onClick={resetShortcut}
+              title="Reset shortcut"
+            >
+              <RotateCcw size={18} />
+            </button>
+          </div>
+          {status && <p className="settings-status">{status}</p>}
+        </section>
       </div>
-    </div>
+    </main>
   );
 }
 
