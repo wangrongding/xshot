@@ -149,6 +149,26 @@ async fn finish_capture(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn set_dock_icon_visible(app: AppHandle, visible: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let policy = if visible {
+            tauri::ActivationPolicy::Regular
+        } else {
+            tauri::ActivationPolicy::Accessory
+        };
+
+        app.set_activation_policy(policy)
+            .map_err(|error| error.to_string())?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, visible);
+
+    Ok(())
+}
+
+#[tauri::command]
 async fn capture_fullscreen(app: AppHandle) -> Result<tauri::ipc::Response, String> {
     // 确保窗口在正确的屏幕上
     ensure_screenshot_window(app.clone()).await?;
@@ -361,16 +381,26 @@ async fn copy_to_clipboard(app: AppHandle, blob_data: Vec<u8>) -> Result<(), Str
 }
 
 #[tauri::command]
-async fn save_to_downloads(blob_data: Vec<u8>) -> Result<String, String> {
+async fn save_to_downloads(
+    blob_data: Vec<u8>,
+    directory: Option<String>,
+) -> Result<String, String> {
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let downloads_dir = std::env::var_os("HOME")
+    let configured_dir = directory
+        .filter(|path| !path.trim().is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
-        .map(|home| home.join("Downloads"))
-        .filter(|path| path.is_dir())
+        .filter(|path| path.is_dir());
+    let downloads_dir = configured_dir
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+                .map(|home| home.join("Downloads"))
+                .filter(|path| path.is_dir())
+        })
         .unwrap_or_else(std::env::temp_dir);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -386,6 +416,8 @@ async fn save_to_downloads(blob_data: Vec<u8>) -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
@@ -395,6 +427,7 @@ pub fn run() {
             copy_to_clipboard,
             save_to_downloads,
             ensure_screenshot_window,
+            set_dock_icon_visible,
             finish_capture,
             open_devtools,
             open_screenshot_devtools

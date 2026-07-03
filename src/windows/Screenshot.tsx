@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useTranslation } from "react-i18next";
 import {
   ArrowUpRight,
   Check,
@@ -22,6 +23,7 @@ import {
 } from "lucide-react";
 import * as fabric from "fabric";
 import { cursorManager, ToolType } from "../logic/cursor";
+import { getSettings } from "../logic/settings";
 
 if (typeof document !== "undefined") {
   document.documentElement.style.backgroundColor = "transparent";
@@ -97,18 +99,30 @@ const RESIZE_HANDLES: ResizeHandle[] = [
 
 const TOOL_BUTTONS: Array<{
   tool: EditorTool;
-  title: string;
+  titleKey: string;
   icon: LucideIcon;
 }> = [
-  { tool: "select", title: "Select area", icon: MousePointer2 },
-  { tool: "sequence", title: "Number marker", icon: ListOrdered },
-  { tool: "mosaic-rect", title: "Mosaic area", icon: Grid2X2 },
-  { tool: "mosaic-brush", title: "Mosaic brush", icon: Paintbrush },
-  { tool: "pen", title: "Pen", icon: Pencil },
-  { tool: "eraser", title: "Eraser", icon: Eraser },
-  { tool: "arrow", title: "Arrow", icon: ArrowUpRight },
-  { tool: "rect", title: "Rectangle", icon: Square },
-  { tool: "line", title: "Line", icon: Minus },
+  { tool: "select", titleKey: "screenshot.tools.select", icon: MousePointer2 },
+  {
+    tool: "sequence",
+    titleKey: "screenshot.tools.sequence",
+    icon: ListOrdered,
+  },
+  {
+    tool: "mosaic-rect",
+    titleKey: "screenshot.tools.mosaicRect",
+    icon: Grid2X2,
+  },
+  {
+    tool: "mosaic-brush",
+    titleKey: "screenshot.tools.mosaicBrush",
+    icon: Paintbrush,
+  },
+  { tool: "pen", titleKey: "screenshot.tools.pen", icon: Pencil },
+  { tool: "eraser", titleKey: "screenshot.tools.eraser", icon: Eraser },
+  { tool: "arrow", titleKey: "screenshot.tools.arrow", icon: ArrowUpRight },
+  { tool: "rect", titleKey: "screenshot.tools.rect", icon: Square },
+  { tool: "line", titleKey: "screenshot.tools.line", icon: Minus },
 ];
 
 function normalizeBounds(start: Point, end: Point): Bounds {
@@ -317,6 +331,7 @@ function isAnnotation(object: fabric.Object) {
 }
 
 export default function ScreenshotWindow() {
+  const { t } = useTranslation();
   const canvasElementRef = useRef<HTMLCanvasElement>(null);
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   const fabricCanvasRef = useRef<fabric.Canvas | null>(null);
@@ -1087,8 +1102,10 @@ export default function ScreenshotWindow() {
     if (!blob) return;
 
     const arrayBuffer = await blob.arrayBuffer();
+    const settings = getSettings();
     await invoke("save_to_downloads", {
       blobData: new Uint8Array(arrayBuffer),
+      directory: settings.defaultSaveDirectory || null,
     });
     await closeCapture();
   };
@@ -1565,12 +1582,12 @@ export default function ScreenshotWindow() {
           }
         >
           <div className="toolbar-group">
-            {TOOL_BUTTONS.map(({ tool, title, icon: Icon }) => (
+            {TOOL_BUTTONS.map(({ tool, titleKey, icon: Icon }) => (
               <button
                 className={`tool-button${activeTool === tool ? " active" : ""}`}
                 key={tool}
                 type="button"
-                title={title}
+                title={t(titleKey)}
                 onClick={() => setActiveTool(tool)}
               >
                 <Icon size={18} />
@@ -1579,7 +1596,10 @@ export default function ScreenshotWindow() {
           </div>
 
           <div className="toolbar-group">
-            <label className="color-button" title="Stroke color">
+            <label
+              className="color-button"
+              title={t("screenshot.tools.strokeColor")}
+            >
               <Palette size={17} />
               <input
                 type="color"
@@ -1587,7 +1607,10 @@ export default function ScreenshotWindow() {
                 onChange={(event) => setStrokeColor(event.target.value)}
               />
             </label>
-            <label className="color-button marker-color" title="Number color">
+            <label
+              className="color-button marker-color"
+              title={t("screenshot.tools.numberColor")}
+            >
               <ListOrdered size={17} />
               <input
                 type="color"
@@ -1601,7 +1624,7 @@ export default function ScreenshotWindow() {
             <button
               className="tool-button danger"
               type="button"
-              title="Close"
+              title={t("screenshot.tools.close")}
               onClick={() => void closeCapture()}
             >
               <X size={18} />
@@ -1609,7 +1632,7 @@ export default function ScreenshotWindow() {
             <button
               className="tool-button"
               type="button"
-              title="Undo"
+              title={t("screenshot.tools.undo")}
               disabled={!canUndo}
               onClick={undo}
             >
@@ -1618,7 +1641,7 @@ export default function ScreenshotWindow() {
             <button
               className="tool-button"
               type="button"
-              title="Redo"
+              title={t("screenshot.tools.redo")}
               disabled={!canRedo}
               onClick={redo}
             >
@@ -1630,7 +1653,7 @@ export default function ScreenshotWindow() {
             <button
               className="tool-button"
               type="button"
-              title="Download"
+              title={t("screenshot.tools.download")}
               onClick={() => void downloadCapture()}
             >
               <Download size={18} />
@@ -1638,7 +1661,7 @@ export default function ScreenshotWindow() {
             <button
               className="tool-button primary"
               type="button"
-              title="Copy to clipboard"
+              title={t("screenshot.tools.copy")}
               onClick={() => void copyToClipboard()}
             >
               <Check size={18} />
@@ -1653,6 +1676,7 @@ export default function ScreenshotWindow() {
       markerColor,
       selectionReady,
       strokeColor,
+      t,
       toolbarPosition,
     ]
   );

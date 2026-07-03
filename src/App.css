@@ -30,7 +30,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -177,14 +178,23 @@ button:disabled {
 }
 
 .settings-status {
-  margin: 9px 0 0;
+  max-width: 150px;
+  margin: 0;
+  overflow: hidden;
   color: #6e7a85;
   font-size: 12px;
   font-weight: 560;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings-section {
   margin-top: 16px;
+}
+
+.preferences-section {
+  margin-top: 14px;
 }
 
 .section-heading {
@@ -202,6 +212,204 @@ button:disabled {
   font-size: 12px;
   font-weight: 720;
   letter-spacing: 0;
+}
+
+.settings-list {
+  display: grid;
+  gap: 7px;
+}
+
+.settings-row {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  min-height: 54px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(28, 38, 48, 0.08);
+  border-radius: 8px;
+  background: rgba(249, 251, 252, 0.72);
+}
+
+.settings-row.stacked {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.settings-row-main {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-row-icon {
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid rgba(22, 119, 255, 0.13);
+  border-radius: 8px;
+  background: rgba(22, 119, 255, 0.07);
+  color: #23537d;
+}
+
+.settings-row-copy {
+  min-width: 0;
+}
+
+.settings-row-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: #1e2935;
+  font-size: 13px;
+  font-weight: 720;
+  line-height: 18px;
+}
+
+.settings-row-title span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-row-copy p {
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: #75818d;
+  font-size: 11px;
+  font-weight: 560;
+  line-height: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-row-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid rgba(112, 128, 143, 0.14);
+  border-radius: 999px;
+  color: #75818d;
+  font-size: 10px;
+  font-weight: 720;
+  line-height: 14px;
+}
+
+.switch {
+  position: relative;
+  display: inline-flex;
+  width: 38px;
+  height: 22px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.switch input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+}
+
+.switch span {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border: 1px solid rgba(70, 81, 92, 0.16);
+  border-radius: 999px;
+  background: #d8e0e8;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease;
+}
+
+.switch span::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(23, 33, 43, 0.22);
+  content: "";
+  transition: transform 140ms ease;
+}
+
+.switch input:checked + span {
+  border-color: rgba(22, 119, 255, 0.32);
+  background: #1677ff;
+}
+
+.switch input:checked + span::after {
+  transform: translateX(16px);
+}
+
+.switch input:focus-visible + span {
+  box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.14);
+}
+
+.switch input:disabled + span {
+  opacity: 0.5;
+}
+
+.switch:has(input:disabled) {
+  cursor: default;
+}
+
+.path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px 38px;
+  gap: 8px;
+}
+
+.path-display {
+  display: block;
+  height: 38px;
+  min-width: 0;
+  padding: 0 11px;
+  overflow: hidden;
+  border: 1px solid #c7d0d9;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #17212b;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 36px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.path-display.empty {
+  color: #7c8792;
+  font-weight: 560;
+}
+
+.select-wrap {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  width: 126px;
+  height: 34px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid #c7d0d9;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #4b5965;
+}
+
+.select-wrap select {
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #17212b;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 660;
 }
 
 .recording-indicator {
@@ -308,6 +516,16 @@ button:disabled {
   border-color: rgba(22, 119, 255, 0.38);
   background: rgba(22, 119, 255, 0.08);
   color: #145fb8;
+}
+
+.icon-button:disabled {
+  opacity: 0.38;
+}
+
+.icon-button:disabled:hover {
+  border-color: #c7d0d9;
+  background: #f9fbfc;
+  color: #3f4b56;
 }
 
 .icon-button.primary,

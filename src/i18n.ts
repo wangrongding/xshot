@@ -1,0 +1,135 @@
+import i18n from "i18next";
+import { initReactI18next } from "react-i18next";
+import { getSettings } from "./logic/settings";
+
+export const resources = {
+  "zh-CN": {
+    translation: {
+      common: {
+        ready: "就绪",
+        recording: "录制中",
+        save: "保存",
+        reset: "重置",
+        choose: "选择",
+        clear: "清除",
+      },
+      settings: {
+        appName: "xshot",
+        capture: "截图",
+        captureTitle: "开始截图",
+        shortcut: "快捷键",
+        preferences: "偏好设置",
+        language: "语言",
+        languageTitle: "界面语言",
+        showDockIcon: "在程序坞显示图标",
+        showDockIconHint: "关闭后应用主要通过托盘运行",
+        macOnly: "仅 macOS",
+        autoStart: "开机自启",
+        autoStartHint: "登录系统后自动启动 xshot",
+        defaultSaveDirectory: "默认保存位置",
+        defaultSaveDirectoryHint: "下载截图时保存到这里",
+        defaultSaveDirectoryEmpty: "未设置，默认保存到下载目录",
+        chooseSaveDirectory: "选择保存文件夹",
+        status: {
+          saved: "已保存",
+          reset: "已重置",
+          shortcutUnavailable: "快捷键不可用",
+          updated: "已更新",
+          updateFailed: "更新失败",
+          pathCleared: "已清除保存位置",
+          pathSelected: "保存位置已更新",
+        },
+      },
+      screenshot: {
+        tools: {
+          select: "选择区域",
+          sequence: "序号标注",
+          mosaicRect: "框选马赛克",
+          mosaicBrush: "涂抹马赛克",
+          pen: "画笔",
+          eraser: "橡皮擦",
+          arrow: "箭头",
+          rect: "选框",
+          line: "直线",
+          strokeColor: "标注颜色",
+          numberColor: "序号颜色",
+          close: "关闭",
+          undo: "撤销",
+          redo: "重做",
+          download: "下载",
+          copy: "复制到剪贴板",
+        },
+      },
+    },
+  },
+  "en-US": {
+    translation: {
+      common: {
+        ready: "Ready",
+        recording: "Recording",
+        save: "Save",
+        reset: "Reset",
+        choose: "Choose",
+        clear: "Clear",
+      },
+      settings: {
+        appName: "xshot",
+        capture: "Capture",
+        captureTitle: "Start capture",
+        shortcut: "Shortcut",
+        preferences: "Preferences",
+        language: "Language",
+        languageTitle: "Interface language",
+        showDockIcon: "Show icon in Dock",
+        showDockIconHint: "When off, xshot mainly runs from the tray",
+        macOnly: "macOS only",
+        autoStart: "Launch at login",
+        autoStartHint: "Start xshot after signing in",
+        defaultSaveDirectory: "Default save location",
+        defaultSaveDirectoryHint: "Downloaded captures are saved here",
+        defaultSaveDirectoryEmpty: "Not set, using Downloads",
+        chooseSaveDirectory: "Choose save folder",
+        status: {
+          saved: "Saved",
+          reset: "Reset",
+          shortcutUnavailable: "Shortcut unavailable",
+          updated: "Updated",
+          updateFailed: "Update failed",
+          pathCleared: "Save location cleared",
+          pathSelected: "Save location updated",
+        },
+      },
+      screenshot: {
+        tools: {
+          select: "Select area",
+          sequence: "Number marker",
+          mosaicRect: "Mosaic area",
+          mosaicBrush: "Mosaic brush",
+          pen: "Pen",
+          eraser: "Eraser",
+          arrow: "Arrow",
+          rect: "Rectangle",
+          line: "Line",
+          strokeColor: "Stroke color",
+          numberColor: "Number color",
+          close: "Close",
+          undo: "Undo",
+          redo: "Redo",
+          download: "Download",
+          copy: "Copy to clipboard",
+        },
+      },
+    },
+  },
+} as const;
+
+i18n.use(initReactI18next).init({
+  resources,
+  lng: getSettings().language,
+  fallbackLng: "zh-CN",
+  interpolation: {
+    escapeValue: false,
+  },
+});
+
+export default i18n;

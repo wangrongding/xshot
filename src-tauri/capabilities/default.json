@@ -13,6 +13,8 @@
     "core:webview:allow-get-all-webviews",
     "core:window:allow-get-all-windows",
     "opener:default",
+    "dialog:default",
+    "autostart:default",
     "global-shortcut:allow-register",
     "global-shortcut:allow-is-registered",
     "global-shortcut:allow-unregister"

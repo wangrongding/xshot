@@ -1,5 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, Crosshair, Keyboard, RotateCcw } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { open } from "@tauri-apps/plugin-dialog";
+import { useTranslation } from "react-i18next";
+import {
+  AppWindowMac,
+  Check,
+  Crosshair,
+  FolderOpen,
+  Keyboard,
+  Languages,
+  Power,
+  RotateCcw,
+  Settings2,
+  X,
+} from "lucide-react";
 import {
   DEFAULT_SHORTCUT,
   getShortcut,
@@ -7,6 +22,13 @@ import {
   setShortcut,
   startCapture,
 } from "./logic/shortcut";
+import {
+  getSettings,
+  SUPPORTED_LANGUAGES,
+  updateSettings,
+  type AppSettings,
+  type AppLanguage,
+} from "./logic/settings";
 import ScreenshotWindow from "./windows/Screenshot";
 import "./App.css";
 
@@ -98,6 +120,7 @@ function formatShortcut(shortcut: string) {
 }
 
 function App() {
+  const { t, i18n } = useTranslation();
   const path = window.location.pathname;
   console.log("Current path:", path);
 
@@ -108,13 +131,45 @@ function App() {
   // 主窗口逻辑（通常隐藏在托盘）
   useEffect(() => {
     registerShortcut();
+
+    const initialSettings = getSettings();
+    void invoke("set_dock_icon_visible", {
+      visible: initialSettings.showDockIcon,
+    }).catch((error) => {
+      console.warn("Failed to apply Dock icon setting:", error);
+    });
+
+    void isEnabled()
+      .then((enabled) => setAutoStart(enabled))
+      .catch((error) => {
+        console.warn("Failed to read autostart state:", error);
+      });
   }, []);
 
   const [shortcut, setShortcutValue] = useState(getShortcut);
   const [draftShortcut, setDraftShortcut] = useState(getShortcut);
+  const [settings, setSettings] = useState(getSettings);
+  const [autoStart, setAutoStart] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [status, setStatus] = useState("");
   const displayShortcut = useMemo(() => formatShortcut(shortcut), [shortcut]);
+  const isMac = useMemo(
+    () => navigator.platform.toLowerCase().includes("mac"),
+    []
+  );
+  const saveDirectoryLabel =
+    settings.defaultSaveDirectory || t("settings.defaultSaveDirectoryEmpty");
+
+  const applySettings = (patch: Partial<AppSettings>) => {
+    const nextSettings = updateSettings(patch);
+    setSettings(nextSettings);
+    return nextSettings;
+  };
+
+  const restoreSettings = (previousSettings: AppSettings) => {
+    updateSettings(previousSettings);
+    setSettings(previousSettings);
+  };
 
   const saveShortcut = async () => {
     if (!draftShortcut) return;
@@ -122,10 +177,10 @@ function App() {
     try {
       await setShortcut(draftShortcut);
       setShortcutValue(draftShortcut);
-      setStatus("Saved");
+      setStatus(t("settings.status.saved"));
       setIsRecording(false);
     } catch {
-      setStatus("Shortcut unavailable");
+      setStatus(t("settings.status.shortcutUnavailable"));
     }
   };
 
@@ -134,11 +189,70 @@ function App() {
     try {
       await setShortcut(DEFAULT_SHORTCUT);
       setShortcutValue(DEFAULT_SHORTCUT);
-      setStatus("Reset");
+      setStatus(t("settings.status.reset"));
       setIsRecording(false);
     } catch {
-      setStatus("Shortcut unavailable");
+      setStatus(t("settings.status.shortcutUnavailable"));
     }
+  };
+
+  const handleDockIconChange = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const visible = event.currentTarget.checked;
+    const previousSettings = settings;
+    applySettings({ showDockIcon: visible });
+
+    try {
+      await invoke("set_dock_icon_visible", { visible });
+      setStatus(t("settings.status.updated"));
+    } catch {
+      restoreSettings(previousSettings);
+      setStatus(t("settings.status.updateFailed"));
+    }
+  };
+
+  const handleAutoStartChange = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const enabled = event.currentTarget.checked;
+    setAutoStart(enabled);
+
+    try {
+      if (enabled) await enable();
+      else await disable();
+      setAutoStart(await isEnabled());
+      setStatus(t("settings.status.updated"));
+    } catch {
+      setAutoStart(!enabled);
+      setStatus(t("settings.status.updateFailed"));
+    }
+  };
+
+  const chooseSaveDirectory = async () => {
+    const selectedPath = await open({
+      directory: true,
+      multiple: false,
+      title: t("settings.chooseSaveDirectory"),
+    });
+
+    if (typeof selectedPath !== "string") return;
+    applySettings({ defaultSaveDirectory: selectedPath });
+    setStatus(t("settings.status.pathSelected"));
+  };
+
+  const clearSaveDirectory = () => {
+    applySettings({ defaultSaveDirectory: "" });
+    setStatus(t("settings.status.pathCleared"));
+  };
+
+  const handleLanguageChange = async (
+    event: React.ChangeEvent<HTMLSelectElement>
+  ) => {
+    const language = event.currentTarget.value as AppLanguage;
+    applySettings({ language });
+    await i18n.changeLanguage(language);
+    setStatus(i18n.t("settings.status.updated"));
   };
 
   return (
@@ -153,7 +267,7 @@ function App() {
               aria-hidden="true"
             />
             <div className="brand-copy">
-              <h1>xshot</h1>
+              <h1>{t("settings.appName")}</h1>
               <p className="shortcut-pill">
                 <Keyboard size={13} />
                 <span>{displayShortcut}</span>
@@ -164,16 +278,16 @@ function App() {
             className="capture-button"
             type="button"
             onClick={() => startCapture()}
-            title="Start capture"
+            title={t("settings.captureTitle")}
           >
             <Crosshair size={18} />
-            <span>Capture</span>
+            <span>{t("settings.capture")}</span>
           </button>
         </div>
 
         <section className="settings-section">
           <div className="section-heading">
-            <label htmlFor="shortcut-input">Shortcut</label>
+            <label htmlFor="shortcut-input">{t("settings.shortcut")}</label>
             <span
               className={
                 isRecording
@@ -181,7 +295,7 @@ function App() {
                   : "recording-indicator"
               }
             >
-              {isRecording ? "Recording" : "Ready"}
+              {isRecording ? t("common.recording") : t("common.ready")}
             </span>
           </div>
           <div className="shortcut-row">
@@ -206,14 +320,14 @@ function App() {
                     setStatus("");
                   }
                 }}
-                placeholder={isRecording ? "Press shortcut" : ""}
+                placeholder={isRecording ? t("common.recording") : ""}
               />
             </div>
             <button
               className="icon-button"
               type="button"
               onClick={saveShortcut}
-              title="Save shortcut"
+              title={t("common.save")}
             >
               <Check size={18} />
             </button>
@@ -221,12 +335,136 @@ function App() {
               className="icon-button"
               type="button"
               onClick={resetShortcut}
-              title="Reset shortcut"
+              title={t("common.reset")}
             >
               <RotateCcw size={18} />
             </button>
           </div>
-          {status && <p className="settings-status">{status}</p>}
+        </section>
+
+        <section className="settings-section preferences-section">
+          <div className="section-heading">
+            <label>{t("settings.preferences")}</label>
+            {status && <span className="settings-status">{status}</span>}
+          </div>
+
+          <div className="settings-list">
+            <div className="settings-row">
+              <div className="settings-row-icon">
+                <AppWindowMac size={17} />
+              </div>
+              <div className="settings-row-copy">
+                <div className="settings-row-title">
+                  <span>{t("settings.showDockIcon")}</span>
+                  {!isMac && (
+                    <span className="settings-row-badge">
+                      {t("settings.macOnly")}
+                    </span>
+                  )}
+                </div>
+                <p>{t("settings.showDockIconHint")}</p>
+              </div>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={settings.showDockIcon}
+                  disabled={!isMac}
+                  aria-label={t("settings.showDockIcon")}
+                  onChange={handleDockIconChange}
+                />
+                <span />
+              </label>
+            </div>
+
+            <div className="settings-row">
+              <div className="settings-row-icon">
+                <Power size={17} />
+              </div>
+              <div className="settings-row-copy">
+                <div className="settings-row-title">
+                  {t("settings.autoStart")}
+                </div>
+                <p>{t("settings.autoStartHint")}</p>
+              </div>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={autoStart}
+                  aria-label={t("settings.autoStart")}
+                  onChange={handleAutoStartChange}
+                />
+                <span />
+              </label>
+            </div>
+
+            <div className="settings-row stacked">
+              <div className="settings-row-main">
+                <div className="settings-row-icon">
+                  <FolderOpen size={17} />
+                </div>
+                <div className="settings-row-copy">
+                  <div className="settings-row-title">
+                    {t("settings.defaultSaveDirectory")}
+                  </div>
+                  <p>{t("settings.defaultSaveDirectoryHint")}</p>
+                </div>
+              </div>
+              <div className="path-row">
+                <div
+                  className={
+                    settings.defaultSaveDirectory
+                      ? "path-display"
+                      : "path-display empty"
+                  }
+                  title={saveDirectoryLabel}
+                >
+                  {saveDirectoryLabel}
+                </div>
+                <button
+                  className="icon-button"
+                  type="button"
+                  title={t("common.choose")}
+                  onClick={() => void chooseSaveDirectory()}
+                >
+                  <FolderOpen size={17} />
+                </button>
+                <button
+                  className="icon-button"
+                  type="button"
+                  title={t("common.clear")}
+                  disabled={!settings.defaultSaveDirectory}
+                  onClick={clearSaveDirectory}
+                >
+                  <X size={17} />
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-row">
+              <div className="settings-row-icon">
+                <Languages size={17} />
+              </div>
+              <div className="settings-row-copy">
+                <div className="settings-row-title">
+                  {t("settings.language")}
+                </div>
+                <p>{t("settings.languageTitle")}</p>
+              </div>
+              <div className="select-wrap">
+                <Settings2 size={15} />
+                <select
+                  value={settings.language}
+                  onChange={(event) => void handleLanguageChange(event)}
+                >
+                  {SUPPORTED_LANGUAGES.map((language) => (
+                    <option key={language.value} value={language.value}>
+                      {language.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
         </section>
       </div>
     </main>
