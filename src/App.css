@@ -45,23 +45,30 @@ button:disabled {
 .settings-shell {
   width: 100vw;
   height: 100vh;
-  padding: 14px;
+  padding: 12px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0)),
+    linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.86),
+      rgba(239, 244, 249, 0.78)
+    ),
     #edf1f5;
 }
 
 .settings-panel {
   position: relative;
+  display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
-  padding: 16px;
+  padding: 14px;
+  overflow: hidden;
   border: 1px solid rgba(28, 38, 48, 0.1);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.86);
+  background: rgba(255, 255, 255, 0.9);
   box-shadow:
-    0 18px 44px rgba(22, 31, 42, 0.14),
-    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+    0 18px 42px rgba(22, 31, 42, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.86);
   backdrop-filter: blur(18px);
 }
 
@@ -70,24 +77,48 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding-bottom: 14px;
+  padding-bottom: 12px;
   border-bottom: 1px solid rgba(27, 37, 47, 0.08);
+}
+
+.brand {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-logo {
+  flex: 0 0 auto;
+  width: 48px;
+  height: 48px;
+  border: 1px solid rgba(20, 95, 184, 0.12);
+  border-radius: 8px;
+  object-fit: cover;
+  box-shadow:
+    0 10px 22px rgba(22, 119, 255, 0.16),
+    0 4px 12px rgba(124, 58, 237, 0.1);
+}
+
+.brand-copy {
+  min-width: 0;
 }
 
 .settings-header h1 {
   margin: 0;
-  font-size: 21px;
+  font-size: 22px;
   line-height: 1.1;
   font-weight: 760;
   letter-spacing: 0;
 }
 
-.settings-header p {
+.shortcut-pill {
   display: inline-flex;
   align-items: center;
+  gap: 5px;
   min-height: 24px;
-  max-width: 285px;
-  margin: 8px 0 0;
+  max-width: 215px;
+  margin: 7px 0 0;
   padding: 2px 9px;
   overflow: hidden;
   border: 1px solid rgba(22, 119, 255, 0.18);
@@ -101,27 +132,100 @@ button:disabled {
   white-space: nowrap;
 }
 
+.shortcut-pill svg {
+  flex: 0 0 auto;
+}
+
+.shortcut-pill span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.capture-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 14px;
+  border: 1px solid rgba(23, 33, 43, 0.08);
+  border-radius: 8px;
+  background: #17212b;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 720;
+  box-shadow:
+    0 10px 20px rgba(23, 33, 43, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  transition:
+    background 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.capture-button:hover {
+  background: #0f1720;
+  box-shadow:
+    0 12px 24px rgba(23, 33, 43, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
+
+.capture-button:active {
+  transform: translateY(1px);
+}
+
 .settings-status {
-  position: absolute;
-  right: 16px;
-  bottom: 13px;
-  margin: 0;
+  margin: 9px 0 0;
   color: #6e7a85;
   font-size: 12px;
   font-weight: 560;
 }
 
 .settings-section {
-  margin-top: 18px;
+  margin-top: 16px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 9px;
 }
 
 .settings-section label {
-  display: block;
-  margin-bottom: 9px;
+  display: inline-flex;
+  align-items: center;
   color: #46515c;
   font-size: 12px;
   font-weight: 720;
   letter-spacing: 0;
+}
+
+.recording-indicator {
+  display: inline-flex;
+  max-width: 108px;
+  min-height: 22px;
+  align-items: center;
+  padding: 1px 8px;
+  overflow: hidden;
+  border: 1px solid rgba(70, 81, 92, 0.12);
+  border-radius: 999px;
+  background: #f4f7fa;
+  color: #6b7580;
+  font-size: 11px;
+  font-weight: 680;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recording-indicator.active {
+  border-color: rgba(22, 119, 255, 0.22);
+  background: rgba(22, 119, 255, 0.09);
+  color: #145fb8;
 }
 
 .shortcut-row {
@@ -155,6 +259,11 @@ button:disabled {
   box-shadow:
     0 0 0 3px rgba(22, 119, 255, 0.1),
     inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.shortcut-input-wrap.is-recording {
+  border-color: rgba(22, 119, 255, 0.54);
+  background: #ffffff;
 }
 
 .shortcut-input-wrap input {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, Keyboard, Play, RotateCcw } from "lucide-react";
+import { Check, Crosshair, Keyboard, RotateCcw } from "lucide-react";
 import {
   DEFAULT_SHORTCUT,
   getShortcut,
@@ -145,24 +145,53 @@ function App() {
     <main className="settings-shell">
       <div className="settings-panel">
         <div className="settings-header">
-          <div>
-            <h1>xshot</h1>
-            <p>{displayShortcut}</p>
+          <div className="brand">
+            <img
+              className="brand-logo"
+              src="/logo.png"
+              alt=""
+              aria-hidden="true"
+            />
+            <div className="brand-copy">
+              <h1>xshot</h1>
+              <p className="shortcut-pill">
+                <Keyboard size={13} />
+                <span>{displayShortcut}</span>
+              </p>
+            </div>
           </div>
           <button
-            className="icon-button primary"
+            className="capture-button"
             type="button"
             onClick={() => startCapture()}
             title="Start capture"
           >
-            <Play size={18} />
+            <Crosshair size={18} />
+            <span>Capture</span>
           </button>
         </div>
 
         <section className="settings-section">
-          <label htmlFor="shortcut-input">Shortcut</label>
+          <div className="section-heading">
+            <label htmlFor="shortcut-input">Shortcut</label>
+            <span
+              className={
+                isRecording
+                  ? "recording-indicator active"
+                  : "recording-indicator"
+              }
+            >
+              {isRecording ? "Recording" : "Ready"}
+            </span>
+          </div>
           <div className="shortcut-row">
-            <div className="shortcut-input-wrap">
+            <div
+              className={
+                isRecording
+                  ? "shortcut-input-wrap is-recording"
+                  : "shortcut-input-wrap"
+              }
+            >
               <Keyboard size={18} />
               <input
                 id="shortcut-input"
