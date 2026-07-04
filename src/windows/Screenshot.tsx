@@ -4,21 +4,20 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTranslation } from "react-i18next";
 import {
-  ArrowUpRight,
   Check,
   Download,
   Eraser,
-  Grid2X2,
-  ListOrdered,
-  Minus,
-  MousePointer2,
-  Paintbrush,
+  Grid3X3,
   Palette,
-  Pencil,
+  PenLine,
+  Pointer,
   Redo2,
-  Square,
+  RectangleHorizontal,
+  Slash,
+  Type,
   Undo2,
   X,
+  createLucideIcon,
   type LucideIcon,
 } from "lucide-react";
 import * as fabric from "fabric";
@@ -64,21 +63,33 @@ type EditorTool =
   | "select"
   | "sequence"
   | "mosaic-rect"
-  | "mosaic-brush"
   | "pen"
   | "eraser"
   | "arrow"
   | "rect"
-  | "line";
+  | "line"
+  | "text";
+type AnnotationTool = Exclude<EditorTool, "select" | "eraser">;
+type StrokeTool = Extract<EditorTool, "pen" | "arrow" | "rect" | "line">;
+type TextTool = Extract<EditorTool, "text">;
+type AnnotationData = {
+  role: "annotation";
+  tool: AnnotationTool;
+  color?: string;
+  strokeWidth?: number;
+  fontSize?: number;
+};
 type HistoryAction =
   | { type: "add"; objects: fabric.Object[] }
   | { type: "remove"; objects: fabric.Object[] };
 
 const MIN_SELECTION_SIZE = 18;
-const STROKE_WIDTH = 4;
+const DEFAULT_STROKE_WIDTH = 4;
+const STROKE_WIDTH_OPTIONS = [2, 4, 6, 8];
+const DEFAULT_TEXT_SIZE = 28;
+const TEXT_SIZE_OPTIONS = [18, 24, 32, 40];
 const ERASER_SIZE = 22;
 const MOSAIC_BLOCK_SIZE = 10;
-const MOSAIC_STAMP_SIZE = 34;
 const SELECTION_HANDLE_SIZE = 9;
 const SELECTION_HANDLE_HIT_SIZE = 12;
 const SELECTION_EDGE_HIT_SIZE = 7;
@@ -97,33 +108,61 @@ const RESIZE_HANDLES: ResizeHandle[] = [
   "w",
 ];
 
+const SequenceToolIcon = createLucideIcon("SequenceToolIcon", [
+  ["circle", { cx: "12", cy: "12", r: "8.5" }],
+  ["path", { d: "M10.5 9.5 12.5 8v8" }],
+  ["path", { d: "M10.25 16h4.5" }],
+]);
+
+const ArrowToolIcon = createLucideIcon("ArrowToolIcon", [
+  ["path", { d: "M6 18 18 6" }],
+  ["path", { d: "M10 6h8v8" }],
+]);
+
 const TOOL_BUTTONS: Array<{
   tool: EditorTool;
   titleKey: string;
   icon: LucideIcon;
 }> = [
-  { tool: "select", titleKey: "screenshot.tools.select", icon: MousePointer2 },
+  { tool: "select", titleKey: "screenshot.tools.select", icon: Pointer },
   {
     tool: "sequence",
     titleKey: "screenshot.tools.sequence",
-    icon: ListOrdered,
+    icon: SequenceToolIcon,
   },
+  { tool: "arrow", titleKey: "screenshot.tools.arrow", icon: ArrowToolIcon },
+  {
+    tool: "rect",
+    titleKey: "screenshot.tools.rect",
+    icon: RectangleHorizontal,
+  },
+  { tool: "line", titleKey: "screenshot.tools.line", icon: Slash },
+  { tool: "text", titleKey: "screenshot.tools.text", icon: Type },
+  { tool: "pen", titleKey: "screenshot.tools.pen", icon: PenLine },
+  { tool: "eraser", titleKey: "screenshot.tools.eraser", icon: Eraser },
   {
     tool: "mosaic-rect",
     titleKey: "screenshot.tools.mosaicRect",
-    icon: Grid2X2,
+    icon: Grid3X3,
   },
-  {
-    tool: "mosaic-brush",
-    titleKey: "screenshot.tools.mosaicBrush",
-    icon: Paintbrush,
-  },
-  { tool: "pen", titleKey: "screenshot.tools.pen", icon: Pencil },
-  { tool: "eraser", titleKey: "screenshot.tools.eraser", icon: Eraser },
-  { tool: "arrow", titleKey: "screenshot.tools.arrow", icon: ArrowUpRight },
-  { tool: "rect", titleKey: "screenshot.tools.rect", icon: Square },
-  { tool: "line", titleKey: "screenshot.tools.line", icon: Minus },
 ];
+
+function isStrokeTool(tool: EditorTool | undefined): tool is StrokeTool {
+  return (
+    tool === "pen" || tool === "arrow" || tool === "rect" || tool === "line"
+  );
+}
+
+function isTextTool(tool: EditorTool | undefined): tool is TextTool {
+  return tool === "text";
+}
+
+function logCaptureTiming(start: number, label: string) {
+  if (!import.meta.env.DEV) return;
+  console.debug(
+    `[xshot] capture ${label}: ${Math.round(performance.now() - start)}ms`
+  );
+}
 
 function normalizeBounds(start: Point, end: Point): Bounds {
   return {
@@ -296,9 +335,14 @@ function computeResizeBounds(
   };
 }
 
-function makeArrowPath(start: Point, end: Point, color: string) {
+function makeArrowPath(
+  start: Point,
+  end: Point,
+  color: string,
+  strokeWidth: number
+) {
   const angle = Math.atan2(end.y - start.y, end.x - start.x);
-  const headLength = Math.max(14, STROKE_WIDTH * 4);
+  const headLength = Math.max(14, strokeWidth * 4);
   const headAngle = Math.PI / 7;
   const headA = {
     x: end.x - headLength * Math.cos(angle - headAngle),
@@ -316,18 +360,19 @@ function makeArrowPath(start: Point, end: Point, color: string) {
       stroke: color,
       strokeLineCap: "round",
       strokeLineJoin: "round",
-      strokeWidth: STROKE_WIDTH,
+      strokeWidth,
       selectable: false,
       evented: false,
     }
   );
 }
 
+function getAnnotationData(object: fabric.Object | null | undefined) {
+  return (object as fabric.Object & { data?: AnnotationData })?.data;
+}
+
 function isAnnotation(object: fabric.Object) {
-  return (
-    (object as fabric.Object & { data?: { role?: string } }).data?.role ===
-    "annotation"
-  );
+  return getAnnotationData(object)?.role === "annotation";
 }
 
 export default function ScreenshotWindow() {
@@ -347,24 +392,30 @@ export default function ScreenshotWindow() {
   const windowRegionsRef = useRef<CaptureWindowRegion[]>([]);
   const hoverWindowRef = useRef<CaptureWindowRegion | null>(null);
   const draftObjectRef = useRef<fabric.Object | null>(null);
+  const selectedAnnotationRef = useRef<fabric.Object | null>(null);
   const selectionHandleRefs = useRef<
     Partial<Record<ResizeHandle, fabric.Rect>>
   >({});
   const isDraggingRef = useRef(false);
   const activeToolRef = useRef<EditorTool>("select");
   const strokeColorRef = useRef("#ff4d4f");
+  const strokeWidthRef = useRef(DEFAULT_STROKE_WIDTH);
+  const textSizeRef = useRef(DEFAULT_TEXT_SIZE);
   const markerColorRef = useRef("#1677ff");
   const markerNumberRef = useRef(1);
   const undoStackRef = useRef<HistoryAction[]>([]);
   const redoStackRef = useRef<HistoryAction[]>([]);
   const removedDuringStrokeRef = useRef<Set<fabric.Object>>(new Set());
-  const mosaicPromisesRef = useRef<Array<Promise<fabric.Object | null>>>([]);
 
   const [activeTool, setActiveTool] = useState<EditorTool>("select");
   const [selectionReady, setSelectionReady] = useState(false);
   const [strokeColor, setStrokeColor] = useState("#ff4d4f");
+  const [strokeWidth, setStrokeWidth] = useState(DEFAULT_STROKE_WIDTH);
+  const [textSize, setTextSize] = useState(DEFAULT_TEXT_SIZE);
   const [markerColor, setMarkerColor] = useState("#1677ff");
   const [historyRevision, setHistoryRevision] = useState(0);
+  const [selectedAnnotationRevision, setSelectedAnnotationRevision] =
+    useState(0);
   const [toolbarPosition, setToolbarPosition] = useState<{
     left: number;
     top: number;
@@ -382,7 +433,7 @@ export default function ScreenshotWindow() {
     if (activeTool === "pen") {
       const brush = new fabric.PencilBrush(canvas);
       brush.color = strokeColorRef.current;
-      brush.width = STROKE_WIDTH;
+      brush.width = strokeWidthRef.current;
       canvas.freeDrawingBrush = brush;
       cursorManager.setTool(ToolType.Pen);
       return;
@@ -392,7 +443,8 @@ export default function ScreenshotWindow() {
       cursorManager.setCursor(
         selectionBoundsRef.current ? "default" : "crosshair"
       );
-    } else if (activeTool === "eraser") cursorManager.setTool(ToolType.Eraser);
+    } else if (activeTool === "text") cursorManager.setTool(ToolType.Text);
+    else if (activeTool === "eraser") cursorManager.setTool(ToolType.Eraser);
     else cursorManager.setCursor("crosshair");
   }, [activeTool]);
 
@@ -403,13 +455,26 @@ export default function ScreenshotWindow() {
       activeToolRef.current === "pen"
     ) {
       fabricCanvasRef.current.freeDrawingBrush.color = strokeColor;
-      fabricCanvasRef.current.freeDrawingBrush.width = STROKE_WIDTH;
     }
   }, [strokeColor]);
 
   useEffect(() => {
+    strokeWidthRef.current = strokeWidth;
+    if (
+      fabricCanvasRef.current?.freeDrawingBrush &&
+      activeToolRef.current === "pen"
+    ) {
+      fabricCanvasRef.current.freeDrawingBrush.width = strokeWidth;
+    }
+  }, [strokeWidth]);
+
+  useEffect(() => {
     markerColorRef.current = markerColor;
   }, [markerColor]);
+
+  useEffect(() => {
+    textSizeRef.current = textSize;
+  }, [textSize]);
 
   const bumpHistory = () => setHistoryRevision((value) => value + 1);
 
@@ -421,6 +486,121 @@ export default function ScreenshotWindow() {
     undoStackRef.current.push(action);
     redoStackRef.current = [];
     bumpHistory();
+  };
+
+  const selectAnnotation = (object: fabric.Object | null) => {
+    const canvas = fabricCanvasRef.current;
+    const annotation = object && isAnnotation(object) ? object : null;
+
+    selectedAnnotationRef.current = annotation;
+    if (annotation) {
+      const data = getAnnotationData(annotation);
+      if (data?.tool === "sequence" && data.color) {
+        setMarkerColor(data.color);
+      } else if (data?.tool === "text") {
+        if (data.color) setStrokeColor(data.color);
+        if (data.fontSize) setTextSize(data.fontSize);
+      } else {
+        if (data?.color) setStrokeColor(data.color);
+        if (data?.strokeWidth) setStrokeWidth(data.strokeWidth);
+      }
+      if (canvas?.getActiveObject() !== annotation) {
+        canvas?.setActiveObject(annotation);
+      }
+    } else {
+      if (canvas?.getActiveObject()) {
+        canvas?.discardActiveObject();
+      }
+    }
+
+    setSelectedAnnotationRevision((value) => value + 1);
+    canvas?.requestRenderAll();
+  };
+
+  const getSelectedAnnotationTool = () =>
+    getAnnotationData(selectedAnnotationRef.current)?.tool;
+
+  const applyStrokeColor = (color: string) => {
+    setStrokeColor(color);
+    strokeColorRef.current = color;
+
+    const object = selectedAnnotationRef.current;
+    const tool = getSelectedAnnotationTool();
+    if (!object || (!isStrokeTool(tool) && !isTextTool(tool))) return;
+
+    object.set(isTextTool(tool) ? "fill" : "stroke", color);
+    const data = getAnnotationData(object);
+    if (data) data.color = color;
+    fabricCanvasRef.current?.requestRenderAll();
+  };
+
+  const applyStrokeWidth = (width: number) => {
+    setStrokeWidth(width);
+    strokeWidthRef.current = width;
+
+    const object = selectedAnnotationRef.current;
+    if (!object || !isStrokeTool(getSelectedAnnotationTool())) return;
+
+    object.set("strokeWidth", width);
+    const data = getAnnotationData(object);
+    if (data) data.strokeWidth = width;
+    fabricCanvasRef.current?.requestRenderAll();
+  };
+
+  const applyTextSize = (size: number) => {
+    setTextSize(size);
+    textSizeRef.current = size;
+
+    const object = selectedAnnotationRef.current;
+    if (!object || getSelectedAnnotationTool() !== "text") return;
+
+    object.set("fontSize", size);
+    const data = getAnnotationData(object);
+    if (data) data.fontSize = size;
+    object.setCoords();
+    fabricCanvasRef.current?.requestRenderAll();
+  };
+
+  const applyMarkerColor = (color: string) => {
+    setMarkerColor(color);
+    markerColorRef.current = color;
+
+    const object = selectedAnnotationRef.current;
+    if (!object || getSelectedAnnotationTool() !== "sequence") return;
+
+    const markerObjects =
+      "getObjects" in object && typeof object.getObjects === "function"
+        ? object.getObjects()
+        : [];
+    markerObjects[0]?.set("fill", color);
+    const data = getAnnotationData(object);
+    if (data) data.color = color;
+    fabricCanvasRef.current?.requestRenderAll();
+  };
+
+  const clampAnnotationToSelection = (object: fabric.Object) => {
+    const selection = selectionBoundsRef.current;
+    if (!selection || !isAnnotation(object)) return;
+
+    const bounds = object.getBoundingRect();
+    let nextLeft = object.left ?? bounds.left;
+    let nextTop = object.top ?? bounds.top;
+
+    if (bounds.left < selection.left) {
+      nextLeft += selection.left - bounds.left;
+    }
+    if (bounds.top < selection.top) {
+      nextTop += selection.top - bounds.top;
+    }
+    if (bounds.left + bounds.width > selection.left + selection.width) {
+      nextLeft -= bounds.left + bounds.width - selection.left - selection.width;
+    }
+    if (bounds.top + bounds.height > selection.top + selection.height) {
+      nextTop -= bounds.top + bounds.height - selection.top - selection.height;
+    }
+
+    object.set({ left: nextLeft, top: nextTop });
+    object.setCoords();
   };
 
   const calculateToolbarPosition = (bounds: Bounds) => {
@@ -634,13 +814,26 @@ export default function ScreenshotWindow() {
     return clip;
   };
 
-  const markAnnotation = <T extends fabric.Object>(object: T) => {
+  const markAnnotation = <T extends fabric.Object>(
+    object: T,
+    data: Omit<AnnotationData, "role">
+  ) => {
     object.set({
-      selectable: false,
-      evented: false,
+      selectable: true,
+      evented: true,
+      hasControls: false,
+      hasBorders: true,
+      lockMovementX: false,
+      lockMovementY: false,
+      borderColor: "#1677ff",
+      cornerColor: "#1677ff",
+      hoverCursor: "pointer",
       objectCaching: false,
     });
-    (object as T & { data?: { role: string } }).data = { role: "annotation" };
+    (object as T & { data?: AnnotationData }).data = {
+      role: "annotation",
+      ...data,
+    };
     object.clipPath = makeSelectionClipPath();
     return object;
   };
@@ -652,6 +845,7 @@ export default function ScreenshotWindow() {
     canvas.getObjects().forEach((object) => {
       if (isAnnotation(object)) canvas.remove(object);
     });
+    selectAnnotation(null);
     undoStackRef.current = [];
     redoStackRef.current = [];
     markerNumberRef.current = 1;
@@ -674,6 +868,7 @@ export default function ScreenshotWindow() {
     windowRegionsRef.current = [];
     hoverWindowRef.current = null;
     draftObjectRef.current = null;
+    selectedAnnotationRef.current = null;
     selectionHandleRefs.current = {};
     isDraggingRef.current = false;
     markerNumberRef.current = 1;
@@ -682,14 +877,18 @@ export default function ScreenshotWindow() {
     setToolbarPosition(null);
     setSelectionReady(false);
     setActiveTool("select");
+    setSelectedAnnotationRevision((value) => value + 1);
     bumpHistory();
   };
 
-  const addAnnotation = (object: fabric.Object) => {
+  const addAnnotation = (
+    object: fabric.Object,
+    data: Omit<AnnotationData, "role">
+  ) => {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
 
-    markAnnotation(object);
+    markAnnotation(object, data);
     canvas.add(object);
     bringSelectionHandlesToFront();
     canvas.requestRenderAll();
@@ -754,7 +953,7 @@ export default function ScreenshotWindow() {
       evented: false,
     });
 
-    return markAnnotation(image);
+    return markAnnotation(image, { tool: "mosaic-rect" });
   };
 
   const addMosaicBounds = async (bounds: Bounds) => {
@@ -812,7 +1011,37 @@ export default function ScreenshotWindow() {
       evented: false,
     });
 
-    addAnnotation(marker);
+    addAnnotation(marker, { tool: "sequence", color: markerColorRef.current });
+  };
+
+  const addTextAnnotation = (point: Point) => {
+    const canvas = fabricCanvasRef.current;
+    const selection = selectionBoundsRef.current;
+    if (!canvas || !selection || !pointInBounds(point, selection)) return;
+
+    const text = new fabric.IText(t("screenshot.tools.textPlaceholder"), {
+      left: point.x,
+      top: point.y,
+      fill: strokeColorRef.current,
+      fontSize: textSizeRef.current,
+      fontFamily: "Inter, Arial, sans-serif",
+      fontWeight: "700",
+      editable: true,
+      selectable: true,
+      evented: true,
+      hasControls: false,
+      lockMovementX: false,
+      lockMovementY: false,
+    });
+
+    addAnnotation(text, {
+      tool: "text",
+      color: strokeColorRef.current,
+      fontSize: textSizeRef.current,
+    });
+    selectAnnotation(text);
+    text.enterEditing();
+    text.selectAll();
   };
 
   const eraseAt = (point: Point) => {
@@ -849,6 +1078,11 @@ export default function ScreenshotWindow() {
     if (!canvas || !action) return;
 
     if (action.type === "add") {
+      if (
+        action.objects.includes(selectedAnnotationRef.current as fabric.Object)
+      ) {
+        selectAnnotation(null);
+      }
       action.objects.forEach((object) => canvas.remove(object));
     } else {
       action.objects.forEach((object) => canvas.add(object));
@@ -869,6 +1103,11 @@ export default function ScreenshotWindow() {
       action.objects.forEach((object) => canvas.add(object));
       bringSelectionHandlesToFront();
     } else {
+      if (
+        action.objects.includes(selectedAnnotationRef.current as fabric.Object)
+      ) {
+        selectAnnotation(null);
+      }
       action.objects.forEach((object) => canvas.remove(object));
     }
 
@@ -969,20 +1208,25 @@ export default function ScreenshotWindow() {
         height: bounds.height,
         fill: "transparent",
         stroke: strokeColorRef.current,
-        strokeWidth: STROKE_WIDTH,
+        strokeWidth: strokeWidthRef.current,
         selectable: false,
         evented: false,
       });
     } else if (tool === "line") {
       object = new fabric.Line([start.x, start.y, end.x, end.y], {
         stroke: strokeColorRef.current,
-        strokeWidth: STROKE_WIDTH,
+        strokeWidth: strokeWidthRef.current,
         strokeLineCap: "round",
         selectable: false,
         evented: false,
       });
     } else if (tool === "arrow") {
-      object = makeArrowPath(start, end, strokeColorRef.current);
+      object = makeArrowPath(
+        start,
+        end,
+        strokeColorRef.current,
+        strokeWidthRef.current
+      );
     } else if (tool === "mosaic-rect") {
       object = new fabric.Rect({
         left: bounds.left,
@@ -1033,23 +1277,32 @@ export default function ScreenshotWindow() {
         height: bounds.height,
         fill: "transparent",
         stroke: strokeColorRef.current,
-        strokeWidth: STROKE_WIDTH,
+        strokeWidth: strokeWidthRef.current,
         selectable: false,
         evented: false,
       });
     } else if (tool === "line") {
       object = new fabric.Line([start.x, start.y, end.x, end.y], {
         stroke: strokeColorRef.current,
-        strokeWidth: STROKE_WIDTH,
+        strokeWidth: strokeWidthRef.current,
         strokeLineCap: "round",
         selectable: false,
         evented: false,
       });
     } else {
-      object = makeArrowPath(start, end, strokeColorRef.current);
+      object = makeArrowPath(
+        start,
+        end,
+        strokeColorRef.current,
+        strokeWidthRef.current
+      );
     }
 
-    addAnnotation(object);
+    addAnnotation(object, {
+      tool: tool as StrokeTool,
+      color: strokeColorRef.current,
+      strokeWidth: strokeWidthRef.current,
+    });
   };
 
   const exportSelectionBlob = async () => {
@@ -1150,17 +1403,43 @@ export default function ScreenshotWindow() {
         return;
       }
 
-      markAnnotation(path);
+      markAnnotation(path, {
+        tool: "pen",
+        color: strokeColorRef.current,
+        strokeWidth: strokeWidthRef.current,
+      });
       pushHistory({ type: "add", objects: [path] });
       canvas.requestRenderAll();
+    };
+    const handleObjectSelection = (event: { selected?: fabric.Object[] }) => {
+      const object = event.selected?.find((item) => isAnnotation(item)) ?? null;
+      selectAnnotation(object);
+    };
+    const handleSelectionCleared = () => {
+      selectedAnnotationRef.current = null;
+      setSelectedAnnotationRevision((value) => value + 1);
+    };
+    const handleObjectMoving = (event: { target?: fabric.Object }) => {
+      if (!event.target) return;
+      clampAnnotationToSelection(event.target);
+      if (isAnnotation(event.target))
+        selectedAnnotationRef.current = event.target;
     };
 
     window.addEventListener("resize", handleResize);
     canvas.on("path:created", handlePathCreated);
+    canvas.on("selection:created", handleObjectSelection);
+    canvas.on("selection:updated", handleObjectSelection);
+    canvas.on("selection:cleared", handleSelectionCleared);
+    canvas.on("object:moving", handleObjectMoving);
 
     return () => {
       window.removeEventListener("resize", handleResize);
       canvas.off("path:created", handlePathCreated);
+      canvas.off("selection:created", handleObjectSelection);
+      canvas.off("selection:updated", handleObjectSelection);
+      canvas.off("selection:cleared", handleSelectionCleared);
+      canvas.off("object:moving", handleObjectMoving);
       cursorManager.unbindCanvas();
       canvas.dispose();
     };
@@ -1180,7 +1459,17 @@ export default function ScreenshotWindow() {
       isDraggingRef.current = true;
       dragStartRef.current = point;
 
+      if (opt.target && isAnnotation(opt.target)) {
+        isDraggingRef.current = false;
+        dragStartRef.current = null;
+        selectionDragRef.current = null;
+        selectAnnotation(opt.target);
+        return;
+      }
+
       if (tool === "select") {
+        selectAnnotation(null);
+
         if (selection) {
           const handle = getResizeHandleAtPoint(point, selection);
           if (handle) {
@@ -1212,7 +1501,7 @@ export default function ScreenshotWindow() {
             start: point,
             bounds: { ...hoveredWindow },
           };
-          cursorManager.setCursor("pointer");
+          cursorManager.setCursor("crosshair");
           return;
         }
 
@@ -1243,18 +1532,13 @@ export default function ScreenshotWindow() {
         isDraggingRef.current = false;
         dragStartRef.current = null;
         addSequenceMarker(point);
+      } else if (tool === "text") {
+        isDraggingRef.current = false;
+        dragStartRef.current = null;
+        addTextAnnotation(point);
       } else if (tool === "eraser") {
         removedDuringStrokeRef.current = new Set();
         eraseAt(point);
-      } else if (tool === "mosaic-brush") {
-        mosaicPromisesRef.current = [
-          addMosaicBounds({
-            left: point.x - MOSAIC_STAMP_SIZE / 2,
-            top: point.y - MOSAIC_STAMP_SIZE / 2,
-            width: MOSAIC_STAMP_SIZE,
-            height: MOSAIC_STAMP_SIZE,
-          }),
-        ];
       } else {
         renderDraftObject(tool, point, point);
       }
@@ -1275,7 +1559,7 @@ export default function ScreenshotWindow() {
             if (hoveredWindow) {
               hoverWindowRef.current = hoveredWindow;
               updateSelection(hoveredWindow);
-              cursorManager.setCursor("pointer");
+              cursorManager.setCursor("crosshair");
             } else {
               clearHoverWindowPreview();
               cursorManager.setCursor("crosshair");
@@ -1359,23 +1643,6 @@ export default function ScreenshotWindow() {
 
       if (tool === "eraser") {
         eraseAt(point);
-      } else if (tool === "mosaic-brush") {
-        const lastStart = dragStartRef.current;
-        const distance = Math.hypot(
-          point.x - lastStart.x,
-          point.y - lastStart.y
-        );
-        if (distance < MOSAIC_STAMP_SIZE * 0.45) return;
-
-        dragStartRef.current = point;
-        mosaicPromisesRef.current.push(
-          addMosaicBounds({
-            left: point.x - MOSAIC_STAMP_SIZE / 2,
-            top: point.y - MOSAIC_STAMP_SIZE / 2,
-            width: MOSAIC_STAMP_SIZE,
-            height: MOSAIC_STAMP_SIZE,
-          })
-        );
       } else {
         renderDraftObject(tool, dragStartRef.current, point);
       }
@@ -1421,17 +1688,6 @@ export default function ScreenshotWindow() {
         const removedObjects = [...removedDuringStrokeRef.current];
         removedDuringStrokeRef.current = new Set();
         pushHistory({ type: "remove", objects: removedObjects });
-      } else if (tool === "mosaic-brush") {
-        const promises = [...mosaicPromisesRef.current];
-        mosaicPromisesRef.current = [];
-        void Promise.all(promises).then((objects) => {
-          pushHistory({
-            type: "add",
-            objects: objects.filter((object): object is fabric.Object =>
-              Boolean(object)
-            ),
-          });
-        });
       } else {
         void finishDraftObject(tool, start, point);
       }
@@ -1450,11 +1706,14 @@ export default function ScreenshotWindow() {
 
   useEffect(() => {
     const unlisten = listen("start-capture", async () => {
+      const startedAt = performance.now();
       try {
         await getCurrentWindow().hide();
         resetEditor();
+        logCaptureTiming(startedAt, "window hidden");
 
         const imageBytes = await invoke<ArrayBuffer>("capture_fullscreen");
+        logCaptureTiming(startedAt, "screen captured");
         const blob = new Blob([imageBytes], { type: "image/png" });
         const url = URL.createObjectURL(blob);
         sourceUrlRef.current = url;
@@ -1463,6 +1722,7 @@ export default function ScreenshotWindow() {
         sourceImage.src = url;
         await sourceImage.decode();
         sourceImageRef.current = sourceImage;
+        logCaptureTiming(startedAt, "source image decoded");
 
         const canvas = fabricCanvasRef.current;
         if (!canvas) return;
@@ -1505,6 +1765,7 @@ export default function ScreenshotWindow() {
         canvas.add(mask);
 
         const selectionImg = await fabric.FabricImage.fromURL(url);
+        logCaptureTiming(startedAt, "fabric images and windows ready");
         selectionImg.set({
           left: 0,
           top: 0,
@@ -1525,6 +1786,7 @@ export default function ScreenshotWindow() {
         const win = getCurrentWindow();
         await win.show();
         await win.setFocus();
+        logCaptureTiming(startedAt, "shown");
       } catch (error) {
         console.error("Failed to start capture:", error);
       }
@@ -1564,122 +1826,184 @@ export default function ScreenshotWindow() {
   useEffect(() => {
     if (!selectionReady || !selectionBoundsRef.current) return;
     syncToolbarPosition(selectionBoundsRef.current);
-  }, [activeTool, historyRevision, markerColor, selectionReady, strokeColor]);
+  }, [
+    activeTool,
+    historyRevision,
+    markerColor,
+    selectedAnnotationRevision,
+    selectionReady,
+    strokeColor,
+    strokeWidth,
+    textSize,
+  ]);
 
-  const toolbar = useMemo(
-    () =>
-      selectionReady ? (
-        <div
-          ref={toolbarRef}
-          className="capture-toolbar"
-          style={
-            toolbarPosition
-              ? {
-                  left: toolbarPosition.left,
-                  top: toolbarPosition.top,
-                }
-              : undefined
-          }
+  const toolbar = useMemo(() => {
+    const selectedAnnotation = selectedAnnotationRef.current;
+    const selectedTool = getAnnotationData(selectedAnnotation)?.tool;
+    const optionTool = selectedTool ?? activeTool;
+    const showStrokeOptions = isStrokeTool(optionTool);
+    const showTextOptions = isTextTool(optionTool);
+    const showMarkerOptions = optionTool === "sequence";
+    const popoverPlacement =
+      toolbarPosition && toolbarPosition.top < 96 ? "below" : "above";
+    const renderToolOptions = () => (
+      <div className={`tool-popover ${popoverPlacement}`}>
+        <label
+          className="color-button"
+          title={t(
+            showMarkerOptions
+              ? "screenshot.tools.numberColor"
+              : "screenshot.tools.strokeColor"
+          )}
         >
-          <div className="toolbar-group">
-            {TOOL_BUTTONS.map(({ tool, titleKey, icon: Icon }) => (
+          <Palette size={17} />
+          <span
+            className="color-preview"
+            style={{
+              background: showMarkerOptions ? markerColor : strokeColor,
+            }}
+          />
+          <input
+            type="color"
+            value={showMarkerOptions ? markerColor : strokeColor}
+            onChange={(event) =>
+              showMarkerOptions
+                ? applyMarkerColor(event.target.value)
+                : applyStrokeColor(event.target.value)
+            }
+          />
+        </label>
+
+        {showStrokeOptions &&
+          STROKE_WIDTH_OPTIONS.map((width) => (
+            <button
+              className={`stroke-width-button${
+                strokeWidth === width ? " active" : ""
+              }`}
+              key={width}
+              type="button"
+              title={t("screenshot.tools.strokeWidth")}
+              onClick={() => applyStrokeWidth(width)}
+            >
+              <span
+                className="stroke-width-line"
+                style={{ height: `${width}px` }}
+              />
+            </button>
+          ))}
+
+        {showTextOptions &&
+          TEXT_SIZE_OPTIONS.map((size) => (
+            <button
+              className={`text-size-button${textSize === size ? " active" : ""}`}
+              key={size}
+              type="button"
+              title={t("screenshot.tools.textSize")}
+              onClick={() => applyTextSize(size)}
+            >
+              {size}
+            </button>
+          ))}
+      </div>
+    );
+
+    return selectionReady ? (
+      <div
+        ref={toolbarRef}
+        className="capture-toolbar"
+        style={
+          toolbarPosition
+            ? {
+                left: toolbarPosition.left,
+                top: toolbarPosition.top,
+              }
+            : undefined
+        }
+      >
+        <div className="toolbar-group">
+          {TOOL_BUTTONS.map(({ tool, titleKey, icon: Icon }) => (
+            <div className="tool-button-wrap" key={tool}>
               <button
-                className={`tool-button${activeTool === tool ? " active" : ""}`}
-                key={tool}
+                className={`tool-button${
+                  activeTool === tool || selectedTool === tool ? " active" : ""
+                }`}
                 type="button"
                 title={t(titleKey)}
-                onClick={() => setActiveTool(tool)}
+                onClick={() => {
+                  if (tool !== "select") selectAnnotation(null);
+                  setActiveTool(tool);
+                }}
               >
                 <Icon size={18} />
               </button>
-            ))}
-          </div>
-
-          <div className="toolbar-group">
-            <label
-              className="color-button"
-              title={t("screenshot.tools.strokeColor")}
-            >
-              <Palette size={17} />
-              <input
-                type="color"
-                value={strokeColor}
-                onChange={(event) => setStrokeColor(event.target.value)}
-              />
-            </label>
-            <label
-              className="color-button marker-color"
-              title={t("screenshot.tools.numberColor")}
-            >
-              <ListOrdered size={17} />
-              <input
-                type="color"
-                value={markerColor}
-                onChange={(event) => setMarkerColor(event.target.value)}
-              />
-            </label>
-          </div>
-
-          <div className="toolbar-group">
-            <button
-              className="tool-button danger"
-              type="button"
-              title={t("screenshot.tools.close")}
-              onClick={() => void closeCapture()}
-            >
-              <X size={18} />
-            </button>
-            <button
-              className="tool-button"
-              type="button"
-              title={t("screenshot.tools.undo")}
-              disabled={!canUndo}
-              onClick={undo}
-            >
-              <Undo2 size={18} />
-            </button>
-            <button
-              className="tool-button"
-              type="button"
-              title={t("screenshot.tools.redo")}
-              disabled={!canRedo}
-              onClick={redo}
-            >
-              <Redo2 size={18} />
-            </button>
-          </div>
-
-          <div className="toolbar-group">
-            <button
-              className="tool-button"
-              type="button"
-              title={t("screenshot.tools.download")}
-              onClick={() => void downloadCapture()}
-            >
-              <Download size={18} />
-            </button>
-            <button
-              className="tool-button primary"
-              type="button"
-              title={t("screenshot.tools.copy")}
-              onClick={() => void copyToClipboard()}
-            >
-              <Check size={18} />
-            </button>
-          </div>
+              {optionTool === tool &&
+                (showStrokeOptions || showMarkerOptions || showTextOptions) &&
+                renderToolOptions()}
+            </div>
+          ))}
         </div>
-      ) : null,
-    [
-      activeTool,
-      canRedo,
-      canUndo,
-      markerColor,
-      selectionReady,
-      strokeColor,
-      t,
-      toolbarPosition,
-    ]
-  );
+
+        <div className="toolbar-group">
+          <button
+            className="tool-button danger"
+            type="button"
+            title={t("screenshot.tools.close")}
+            onClick={() => void closeCapture()}
+          >
+            <X size={18} />
+          </button>
+          <button
+            className="tool-button"
+            type="button"
+            title={t("screenshot.tools.undo")}
+            disabled={!canUndo}
+            onClick={undo}
+          >
+            <Undo2 size={18} />
+          </button>
+          <button
+            className="tool-button"
+            type="button"
+            title={t("screenshot.tools.redo")}
+            disabled={!canRedo}
+            onClick={redo}
+          >
+            <Redo2 size={18} />
+          </button>
+        </div>
+
+        <div className="toolbar-group">
+          <button
+            className="tool-button"
+            type="button"
+            title={t("screenshot.tools.download")}
+            onClick={() => void downloadCapture()}
+          >
+            <Download size={18} />
+          </button>
+          <button
+            className="tool-button primary"
+            type="button"
+            title={t("screenshot.tools.copy")}
+            onClick={() => void copyToClipboard()}
+          >
+            <Check size={18} />
+          </button>
+        </div>
+      </div>
+    ) : null;
+  }, [
+    activeTool,
+    canRedo,
+    canUndo,
+    markerColor,
+    selectionReady,
+    selectedAnnotationRevision,
+    strokeColor,
+    strokeWidth,
+    t,
+    toolbarPosition,
+  ]);
 
   return (
     <div className="screenshot-root">

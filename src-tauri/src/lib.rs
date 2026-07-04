@@ -1,8 +1,6 @@
 #[cfg(not(target_os = "macos"))]
-use image::ImageFormat;
+use image::ImageEncoder;
 use serde::Serialize;
-#[cfg(not(target_os = "macos"))]
-use std::io::Cursor;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -33,14 +31,24 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 fn open_devtools(window: WebviewWindow) {
+    #[cfg(debug_assertions)]
     window.open_devtools();
+
+    #[cfg(not(debug_assertions))]
+    let _ = window;
 }
 
 #[tauri::command]
 fn open_screenshot_devtools(app: AppHandle) {
-    if let Some(window) = app.get_webview_window("screenshot_window") {
-        window.open_devtools();
+    #[cfg(debug_assertions)]
+    {
+        if let Some(window) = app.get_webview_window("screenshot_window") {
+            window.open_devtools();
+        }
     }
+
+    #[cfg(not(debug_assertions))]
+    let _ = app;
 }
 
 #[tauri::command]
@@ -192,10 +200,7 @@ async fn set_dock_icon_visible(app: AppHandle, visible: bool) -> Result<(), Stri
 }
 
 #[tauri::command]
-async fn capture_fullscreen(app: AppHandle) -> Result<tauri::ipc::Response, String> {
-    // 确保窗口在正确的屏幕上
-    ensure_screenshot_window(app.clone()).await?;
-
+async fn capture_fullscreen(_app: AppHandle) -> Result<tauri::ipc::Response, String> {
     let start_time = std::time::Instant::now();
     #[cfg(target_os = "macos")]
     {
