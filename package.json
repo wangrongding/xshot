@@ -11,13 +11,6 @@
     "dev:web": "vite",
     "build:web": "tsc && vite build",
     "preview": "vite preview",
-    "============= mobile =============": "",
-    "tauri:android:init": "tauri android init",
-    "tauri:android:dev": "tauri android dev",
-    "tauri:android:build": "tauri android build",
-    "tauri:ios:init": "tauri ios init",
-    "tauri:ios:dev": "tauri ios dev",
-    "tauri:ios:build": "tauri ios build",
     "============= chore =============": "",
     "format": "prettier --write . && cargo fmt --manifest-path src-tauri/Cargo.toml",
     "tsc": "tsc --noEmit"
@@ -36,6 +29,7 @@
     "react-i18next": "^17.0.8"
   },
   "devDependencies": {
+    "@ai-ins/vite": "^0.4.8",
     "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^25.0.2",
     "@types/react": "^19.1.8",
