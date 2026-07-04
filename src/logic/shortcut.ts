@@ -2,7 +2,7 @@ import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import { emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 
-export const DEFAULT_SHORTCUT = "CommandOrControl+Alt+X";
+export const DEFAULT_SHORTCUT = "Alt+X";
 const SHORTCUT_STORAGE_KEY = "xshot.shortcut";
 
 let registeredShortcut: string | null = null;
@@ -41,18 +41,32 @@ export async function registerShortcut(shortcut = readStoredShortcut()) {
     .then(async () => {
       if (registeredShortcut === shortcut) return;
 
-      await registerAccelerator(shortcut);
-
+      const previousShortcut = registeredShortcut;
       if (registeredShortcut) {
         try {
           await unregister(registeredShortcut);
+          registeredShortcut = null;
         } catch (error) {
           console.warn("Failed to unregister previous shortcut:", error);
         }
       }
 
-      registeredShortcut = shortcut;
-      console.log("Shortcut registered successfully:", shortcut);
+      try {
+        await registerAccelerator(shortcut);
+        registeredShortcut = shortcut;
+        console.log("Shortcut registered successfully:", shortcut);
+      } catch (error) {
+        if (previousShortcut) {
+          try {
+            await registerAccelerator(previousShortcut);
+            registeredShortcut = previousShortcut;
+          } catch (restoreError) {
+            console.warn("Failed to restore previous shortcut:", restoreError);
+          }
+        }
+
+        throw error;
+      }
     });
 
   registrationQueue = task.catch(() => undefined);
