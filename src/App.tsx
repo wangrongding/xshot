@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -10,6 +10,7 @@ import {
   FolderOpen,
   Keyboard,
   Languages,
+  Pencil,
   Power,
   RotateCcw,
   Settings2,
@@ -146,13 +147,13 @@ function App() {
       });
   }, []);
 
-  const [shortcut, setShortcutValue] = useState(getShortcut);
   const [draftShortcut, setDraftShortcut] = useState(getShortcut);
   const [settings, setSettings] = useState(getSettings);
   const [autoStart, setAutoStart] = useState(false);
+  const [isEditingShortcut, setIsEditingShortcut] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [status, setStatus] = useState("");
-  const displayShortcut = useMemo(() => formatShortcut(shortcut), [shortcut]);
+  const shortcutInputRef = useRef<HTMLInputElement>(null);
   const isMac = useMemo(
     () => navigator.platform.toLowerCase().includes("mac"),
     []
@@ -167,8 +168,19 @@ function App() {
   };
 
   const restoreSettings = (previousSettings: AppSettings) => {
-    updateSettings(previousSettings);
+    updateSettings({
+      showDockIcon: previousSettings.showDockIcon,
+      defaultSaveDirectory: previousSettings.defaultSaveDirectory,
+    });
     setSettings(previousSettings);
+  };
+
+  const editShortcut = () => {
+    setDraftShortcut(getShortcut());
+    setIsEditingShortcut(true);
+    setIsRecording(true);
+    setStatus("");
+    window.requestAnimationFrame(() => shortcutInputRef.current?.focus());
   };
 
   const saveShortcut = async () => {
@@ -176,8 +188,8 @@ function App() {
 
     try {
       await setShortcut(draftShortcut);
-      setShortcutValue(draftShortcut);
       setStatus(t("settings.status.saved"));
+      setIsEditingShortcut(false);
       setIsRecording(false);
     } catch {
       setStatus(t("settings.status.shortcutUnavailable"));
@@ -188,12 +200,19 @@ function App() {
     setDraftShortcut(DEFAULT_SHORTCUT);
     try {
       await setShortcut(DEFAULT_SHORTCUT);
-      setShortcutValue(DEFAULT_SHORTCUT);
       setStatus(t("settings.status.reset"));
+      setIsEditingShortcut(false);
       setIsRecording(false);
     } catch {
       setStatus(t("settings.status.shortcutUnavailable"));
     }
+  };
+
+  const cancelShortcutEdit = () => {
+    setDraftShortcut(getShortcut());
+    setIsEditingShortcut(false);
+    setIsRecording(false);
+    setStatus("");
   };
 
   const handleDockIconChange = async (
@@ -260,19 +279,13 @@ function App() {
       <div className="settings-panel">
         <div className="settings-header">
           <div className="brand">
-            <img
-              className="brand-logo"
-              src="/logo.png"
-              alt=""
-              aria-hidden="true"
-            />
-            <div className="brand-copy">
-              <h1>{t("settings.appName")}</h1>
-              <p className="shortcut-pill">
-                <Keyboard size={13} />
-                <span>{displayShortcut}</span>
-              </p>
-            </div>
+            <h1 className="brand-title">
+              <img
+                className="brand-logo"
+                src="/logo-full.png"
+                alt={t("settings.appName")}
+              />
+            </h1>
           </div>
           <button
             className="capture-button"
@@ -298,7 +311,11 @@ function App() {
               {isRecording ? t("common.recording") : t("common.ready")}
             </span>
           </div>
-          <div className="shortcut-row">
+          <div
+            className={
+              isEditingShortcut ? "shortcut-row is-editing" : "shortcut-row"
+            }
+          >
             <div
               className={
                 isRecording
@@ -308,11 +325,15 @@ function App() {
             >
               <Keyboard size={18} />
               <input
+                ref={shortcutInputRef}
                 id="shortcut-input"
                 value={formatShortcut(draftShortcut)}
                 readOnly
-                onFocus={() => setIsRecording(true)}
+                onFocus={() => {
+                  if (isEditingShortcut) setIsRecording(true);
+                }}
                 onKeyDown={(event) => {
+                  if (!isEditingShortcut) return;
                   event.preventDefault();
                   const nextShortcut = shortcutFromEvent(event);
                   if (nextShortcut) {
@@ -323,22 +344,45 @@ function App() {
                 placeholder={isRecording ? t("common.recording") : ""}
               />
             </div>
-            <button
-              className="icon-button"
-              type="button"
-              onClick={saveShortcut}
-              title={t("common.save")}
-            >
-              <Check size={18} />
-            </button>
-            <button
-              className="icon-button"
-              type="button"
-              onClick={resetShortcut}
-              title={t("common.reset")}
-            >
-              <RotateCcw size={18} />
-            </button>
+            {isEditingShortcut ? (
+              <>
+                <button
+                  className="icon-button"
+                  type="button"
+                  onClick={saveShortcut}
+                  title={t("common.save")}
+                >
+                  <Check size={18} />
+                </button>
+                <button
+                  className="icon-button"
+                  type="button"
+                  onClick={cancelShortcutEdit}
+                  title={t("common.cancel")}
+                >
+                  <X size={18} />
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  className="icon-button"
+                  type="button"
+                  onClick={editShortcut}
+                  title={t("common.edit")}
+                >
+                  <Pencil size={18} />
+                </button>
+                <button
+                  className="icon-button"
+                  type="button"
+                  onClick={resetShortcut}
+                  title={t("common.reset")}
+                >
+                  <RotateCcw size={18} />
+                </button>
+              </>
+            )}
           </div>
         </section>
 

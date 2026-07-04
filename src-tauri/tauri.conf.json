@@ -15,7 +15,7 @@
         "label": "main",
         "title": "xshot",
         "width": 440,
-        "height": 500,
+        "height": 560,
         "center": true,
         "decorations": true,
         "resizable": false,

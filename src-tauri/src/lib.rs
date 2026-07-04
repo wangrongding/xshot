@@ -148,8 +148,21 @@ async fn finish_capture(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 #[tauri::command]
 async fn set_dock_icon_visible(app: AppHandle, visible: bool) -> Result<(), String> {
+    let should_restore_main_window = app
+        .get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false);
+
     #[cfg(target_os = "macos")]
     {
         let policy = if visible {
@@ -160,6 +173,16 @@ async fn set_dock_icon_visible(app: AppHandle, visible: bool) -> Result<(), Stri
 
         app.set_activation_policy(policy)
             .map_err(|error| error.to_string())?;
+    }
+
+    if should_restore_main_window {
+        show_main_window(&app);
+
+        let app_handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            show_main_window(&app_handle);
+        });
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -412,7 +435,6 @@ async fn save_to_downloads(
     Ok(path.to_string_lossy().to_string())
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -461,10 +483,7 @@ pub fn run() {
                         });
                     }
                     "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        show_main_window(app);
                     }
                     "quit" => {
                         app.exit(0);
@@ -487,10 +506,7 @@ pub fn run() {
         .expect("error while running tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Reopen { .. } = event {
-                if let Some(window) = app_handle.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                show_main_window(app_handle);
             }
         });
 }
