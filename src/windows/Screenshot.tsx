@@ -223,6 +223,19 @@ function logLongCaptureDebug(label: string, payload?: Record<string, unknown>) {
   else console.debug(`[xshot] long capture ${label}`);
 }
 
+function isImeComposingEvent(event: KeyboardEvent) {
+  return event.isComposing || event.key === "Process" || event.keyCode === 229;
+}
+
+function isKeyboardInputTarget(target: EventTarget | null) {
+  if (!(target instanceof Element)) return false;
+
+  if (target.closest("input, textarea, select")) return true;
+
+  const editable = target.closest("[contenteditable]");
+  return editable instanceof HTMLElement && editable.isContentEditable;
+}
+
 function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
@@ -907,6 +920,16 @@ export default function ScreenshotWindow() {
   const getSelectedAnnotationTool = () =>
     getAnnotationData(selectedAnnotationRef.current)?.tool;
 
+  const isScreenshotTextEditing = () => {
+    const canvas = fabricCanvasRef.current;
+    const object = canvas?.getActiveObject() ?? selectedAnnotationRef.current;
+    return Boolean(
+      object &&
+      "isEditing" in object &&
+      (object as fabric.Object & { isEditing?: boolean }).isEditing
+    );
+  };
+
   const applyStrokeColor = (color: string) => {
     setStrokeColor(color);
     strokeColorRef.current = color;
@@ -1576,6 +1599,18 @@ export default function ScreenshotWindow() {
     undoStackRef.current.push(action);
     canvas.requestRenderAll();
     bumpHistory();
+  };
+
+  const deleteSelectedAnnotation = () => {
+    const canvas = fabricCanvasRef.current;
+    const object = selectedAnnotationRef.current;
+    if (!canvas || !object || !isAnnotation(object)) return false;
+
+    selectAnnotation(null);
+    canvas.remove(object);
+    pushHistory({ type: "remove", objects: [object] });
+    canvas.requestRenderAll();
+    return true;
   };
 
   const updateSelection = (
@@ -2953,6 +2988,14 @@ export default function ScreenshotWindow() {
 
   useEffect(() => {
     const handleKeyDown = async (event: KeyboardEvent) => {
+      if (
+        isImeComposingEvent(event) ||
+        isKeyboardInputTarget(event.target) ||
+        isScreenshotTextEditing()
+      ) {
+        return;
+      }
+
       if (longCaptureActiveRef.current) {
         if (event.key === "Escape") {
           event.preventDefault();
@@ -2966,6 +3009,8 @@ export default function ScreenshotWindow() {
 
       if (event.key === "Escape") {
         await closeCapture();
+      } else if (event.key === "Backspace" || event.key === "Delete") {
+        if (deleteSelectedAnnotation()) event.preventDefault();
       } else if (event.key === "Enter") {
         await copyToClipboard();
       } else if (

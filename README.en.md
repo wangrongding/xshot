@@ -14,33 +14,14 @@
 
 xshot is a desktop screenshot tool for quick capture, window/region selection, annotation, scrolling capture, crop, pin-to-screen, clipboard copy, and PNG saving. It is designed to be used from the tray and a global shortcut.
 
+![screenshot/xshot.jpeg](./screenshot/xshot.jpeg)
+
 ## Core Features
 
-- Tray-first app behavior; the main window is hidden by default.
-- Global screenshot shortcut, default:
-  - macOS: `Option + X`
-  - Windows / Linux: `Alt + X`
-- Main window settings for shortcut, Dock icon, launch at login, default save location, language, and macOS permission entry points.
-- Window hover detection: move over a candidate window and click to select that window region.
-- Manual region selection with move and corner resize controls.
-- Manual downward scrolling capture: capture the selected region frame by frame, stitch automatically, and preview live.
-- Long screenshots can be cropped after rendering before copying, pinning, or saving.
-- Capture results can be pinned as always-on-top floating windows with drag, wheel zoom, copy, save, and close controls.
-- Selection-following toolbar with copy-to-clipboard and PNG download actions, positioned away from the top safe area.
-- Built-in Simplified Chinese and English UI.
-
-## Annotation Tools
-
-- Number marker
-- Arrow
-- Rectangle
-- Line
-- Text
-- Pen
-- Eraser
-- Mosaic area
-
-Tool properties such as color, stroke width, and text size live in a secondary panel attached to the corresponding tool button. Clicking an existing annotation selects it first; selected annotations can be moved and edited through the matching tool panel. Clicking an empty area inside the selection creates a new annotation.
+- [x] Supports scrolling capture.
+- [x] Supports pinning capture results as always-on-top floating windows.
+- [x] Supports annotation tools: number marker, arrow, rectangle, line, text, pen, eraser, and mosaic area.
+- [x] Supports window hover detection: move over a candidate window and click to select it.
 
 ## Usage
 
