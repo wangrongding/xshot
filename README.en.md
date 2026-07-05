@@ -12,9 +12,7 @@
   <strong>Lightweight, tray-first desktop screenshot tool.</strong>
 </p>
 
-xshot is a desktop screenshot tool for quick capture, region selection, annotation, clipboard copy, and PNG saving. It is designed to be used from the tray and a global shortcut.
-
-> xshot is still in early development. Features and cross-platform details are evolving quickly.
+xshot is a desktop screenshot tool for quick capture, window/region selection, annotation, scrolling capture, crop, clipboard copy, and PNG saving. It is designed to be used from the tray and a global shortcut.
 
 ## Core Features
 
@@ -22,11 +20,12 @@ xshot is a desktop screenshot tool for quick capture, region selection, annotati
 - Global screenshot shortcut, default:
   - macOS: `Option + X`
   - Windows / Linux: `Alt + X`
-- Main window settings for shortcut, Dock icon, launch at login, default save location, and language.
+- Main window settings for shortcut, Dock icon, launch at login, default save location, language, and macOS permission entry points.
 - Window hover detection: move over a candidate window and click to select that window region.
 - Manual region selection with move and corner resize controls.
-- Manual scrolling capture: capture the selected region frame by frame and stitch overlapping content automatically.
-- Selection-following toolbar with copy-to-clipboard and PNG download actions.
+- Manual downward scrolling capture: capture the selected region frame by frame, stitch automatically, and preview live.
+- Long screenshots can be cropped after rendering before copying or saving.
+- Selection-following toolbar with copy-to-clipboard and PNG download actions, positioned away from the top safe area.
 - Built-in Simplified Chinese and English UI.
 
 ## Annotation Tools
@@ -56,8 +55,10 @@ During capture:
 - Drag anywhere to create a custom region.
 - After the region is ready, the toolbar appears near the selection.
 - Click an annotation tool, then click an empty area inside the selection to create an annotation; clicking an existing annotation selects it first.
-- Click the scrolling capture button to show the floating controller near the bottom-right corner. On macOS, xshot tries to auto-scroll and append frames automatically while a live thumbnail preview updates. You can also scroll manually and press `Space` / click the button to append, then press `Enter` to render the long screenshot.
-- `Enter` or the confirm button copies the capture to the clipboard.
+- Click the scrolling capture button to show the floating preview panel beside the selection. Scroll downward inside the selection; after scrolling settles, xshot samples and stitches automatically. Reverse and horizontal scrolling are ignored to avoid corrupting the stitch.
+- The scrolling capture panel only shows live preview and shortcuts: `Enter` renders the long screenshot, `Esc` cancels.
+- After rendering, the long screenshot returns to the editor. Resize the selection handles to crop it; copy and download export the current crop.
+- `Enter` or the confirm button copies the current capture/crop to the clipboard.
 - The download button saves a PNG.
 - `Esc` or the close button cancels the capture.
 
@@ -69,10 +70,12 @@ During capture:
 - Launch at login: start xshot automatically after sign-in.
 - Default save location: downloaded screenshots are saved here first; otherwise Downloads is used.
 - Language: Simplified Chinese and English.
+- Permissions: on macOS, view Screen Recording and Accessibility authorization status and open the matching System Settings pane.
 
 ## Platform Notes
 
 - On macOS, the first capture may require Screen Recording permission; restart the app after granting it.
+- On macOS, scrolling capture requires Accessibility permission to monitor/filter wheel events and let the window under the selection receive scrolling.
 - Dock icon visibility is macOS-only.
 - The current capture path targets the primary display. Multi-monitor support is still being improved.
 - Window hover detection depends on system window enumeration, so some system windows, overlays, or fullscreen apps may behave differently.
@@ -80,9 +83,11 @@ During capture:
 ## Current Capture Pipeline
 
 - The app creates and hides the screenshot WebView on startup, then reuses it when a capture starts.
-- On macOS, the main path currently uses system `screencapture -x -m`; the result is written to a temporary PNG and then loaded into the frontend editing layer.
+- On macOS, regular capture currently uses system `screencapture -x -R <screenshot-window-rect>`; the result is written to a temporary PNG and then loaded into the frontend editing layer.
 - On Windows / Linux, the current path captures the display through `xcap` and encodes PNG in Rust.
-- Scrolling capture reuses full-screen capture, crops each frame to the selected region, detects vertical overlap in the frontend, and appends only the new content.
+- On macOS, scrolling capture makes the screenshot window mouse-transparent and only passes downward wheel events through. Frames are captured with CoreGraphics `CGWindowListCreateImage` below the screenshot window, with `screencapture -R` as fallback.
+- Scrolling capture stitches by estimating the real vertical offset between frames and appending only the new rows. Tiny shifts do not update the previous frame, which avoids over-appending on repeated textures or blank areas.
+- After rendering, long screenshots enter the crop/edit view; copy and save export the current crop.
 - Capture timing logs are intentionally kept to profile shortcut handling, screen capture, image decoding, and window presentation.
 - ScreenCaptureKit was tested earlier, but the quality and latency tradeoff was not good enough for the main path, so the stable fallback remains the default.
 
@@ -101,10 +106,10 @@ Useful commands:
 
 ```bash
 pnpm install       # Install dependencies
-pnpm run dev       # Start Tauri development mode
+pnpm dev           # Start Tauri development mode
 pnpm dev:web       # Start Vite only
 pnpm build:web     # Build frontend
-pnpm run build     # Build desktop app
+pnpm build         # Build desktop app
 pnpm tsc           # TypeScript check
 pnpm format        # Prettier + cargo fmt
 ```
@@ -123,7 +128,7 @@ public/                 Image assets
 ## Current Limitations
 
 - Multi-monitor support is still incomplete.
-- Scrolling capture currently uses auto-scroll or user-controlled scrolling with automatic sampling and stitching. Auto-scroll depends on macOS event injection and falls back to manual scrolling when unavailable.
+- Scrolling capture is currently macOS-first and depends on Screen Recording and Accessibility permissions. It currently supports downward stitching only.
 - Annotation property edits are applied immediately but are not yet tracked as standalone undo actions.
 - Advanced settings such as image format selection, launch options, and toolbar customization are not exposed yet.
 - Window capture depends on candidate window detection; a few transparent windows, system overlays, or fullscreen spaces may not be matched accurately.
