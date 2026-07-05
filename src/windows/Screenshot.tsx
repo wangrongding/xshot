@@ -12,9 +12,13 @@ import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import { useTranslation } from "react-i18next";
 import {
   Check,
+  Copy,
   Download,
   Eraser,
+  FileText,
   Grid3X3,
+  Languages,
+  Loader2,
   Palette,
   PenLine,
   Pin,
@@ -83,6 +87,12 @@ type AnnotationTool = Exclude<EditorTool, "select" | "eraser">;
 type StrokeTool = Extract<EditorTool, "pen" | "arrow" | "rect" | "line">;
 type TextTool = Extract<EditorTool, "text">;
 type LongCaptureStatus = "idle" | "waiting" | "capturing" | "ready" | "failed";
+type OcrPanelStatus =
+  | "idle"
+  | "recognizing"
+  | "ready"
+  | "translating"
+  | "failed";
 type LongCaptureState = {
   status: LongCaptureStatus;
   frameCount: number;
@@ -101,12 +111,44 @@ type LongCaptureScrollEvent = {
   deltaX: number;
   deltaY: number;
 };
+type OcrBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+type OcrTextBlock = {
+  text: string;
+  confidence: number;
+  bounds: OcrBounds;
+};
+type OcrQrCode = {
+  value: string;
+  url: string | null;
+  bounds: OcrBounds;
+};
+type OcrScanResult = {
+  text: string;
+  blocks: OcrTextBlock[];
+  qrCodes: OcrQrCode[];
+  imageWidth: number;
+  imageHeight: number;
+};
 type AnnotationData = {
   role: "annotation";
   tool: AnnotationTool;
+  source?: "translation-overlay";
   color?: string;
   strokeWidth?: number;
   fontSize?: number;
+};
+type OcrPanelState = {
+  status: OcrPanelStatus;
+  targetLang: string;
+  result: OcrScanResult | null;
+  displayText: string;
+  error: string | null;
+  showingTranslation: boolean;
 };
 type HistoryAction =
   | { type: "add"; objects: fabric.Object[] }
@@ -142,6 +184,30 @@ const LONG_CAPTURE_PANEL_WIDTH = 380;
 const LONG_CAPTURE_PANEL_HEIGHT = 262;
 const LONG_CAPTURE_PANEL_GAP = 14;
 const LONG_CAPTURE_PANEL_MARGIN = 16;
+const OCR_PANEL_WIDTH = 430;
+const OCR_PANEL_HEIGHT = 430;
+const OCR_PANEL_GAP = 14;
+const OCR_PANEL_MARGIN = 16;
+const OCR_TARGET_LANGUAGE_STORAGE_KEY = "xshot.ocr.targetLanguage";
+const TRANSLATION_LANGUAGES = [
+  { code: "zh-CN", name: "简体中文" },
+  { code: "zh-TW", name: "繁體中文" },
+  { code: "en", name: "English" },
+  { code: "ja", name: "日本語" },
+  { code: "ko", name: "한국어" },
+  { code: "fr", name: "Français" },
+  { code: "de", name: "Deutsch" },
+  { code: "es", name: "Español" },
+  { code: "it", name: "Italiano" },
+  { code: "pt", name: "Português" },
+  { code: "ru", name: "Русский" },
+  { code: "ar", name: "العربية" },
+  { code: "tr", name: "Türkçe" },
+  { code: "vi", name: "Tiếng Việt" },
+  { code: "th", name: "ไทย" },
+  { code: "id", name: "Indonesia" },
+  { code: "hi", name: "हिन्दी" },
+];
 const RESIZE_HANDLES: ResizeHandle[] = [
   "nw",
   "n",
@@ -208,6 +274,13 @@ function isStrokeTool(tool: EditorTool | undefined): tool is StrokeTool {
 
 function isTextTool(tool: EditorTool | undefined): tool is TextTool {
   return tool === "text";
+}
+
+function isTranslationOverlay(object: fabric.Object) {
+  return (
+    isAnnotation(object) &&
+    getAnnotationData(object)?.source === "translation-overlay"
+  );
 }
 
 function logCaptureTiming(start: number, label: string) {
@@ -284,6 +357,55 @@ async function imageFromBlob(blob: Blob) {
   image.src = url;
   await image.decode();
   return { image, url };
+}
+
+function clampByte(value: number) {
+  return Math.max(0, Math.min(255, Math.round(value)));
+}
+
+function sampleAverageColor(canvas: HTMLCanvasElement, bounds: OcrBounds) {
+  const context = canvas.getContext("2d");
+  if (!context) return { color: "rgb(255, 255, 255)", light: true };
+
+  const x = Math.max(0, Math.floor(bounds.x * canvas.width));
+  const y = Math.max(0, Math.floor(bounds.y * canvas.height));
+  const width = Math.max(1, Math.ceil(bounds.width * canvas.width));
+  const height = Math.max(1, Math.ceil(bounds.height * canvas.height));
+  const sampleWidth = Math.min(width, canvas.width - x);
+  const sampleHeight = Math.min(height, canvas.height - y);
+  if (sampleWidth <= 0 || sampleHeight <= 0) {
+    return { color: "rgb(255, 255, 255)", light: true };
+  }
+
+  const data = context.getImageData(x, y, sampleWidth, sampleHeight).data;
+  const xStep = Math.max(1, Math.floor(sampleWidth / 6));
+  const yStep = Math.max(1, Math.floor(sampleHeight / 6));
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let count = 0;
+
+  for (let py = 0; py < sampleHeight; py += yStep) {
+    for (let px = 0; px < sampleWidth; px += xStep) {
+      const index = (py * sampleWidth + px) * 4;
+      r += data[index];
+      g += data[index + 1];
+      b += data[index + 2];
+      count += 1;
+    }
+  }
+
+  if (count === 0) return { color: "rgb(255, 255, 255)", light: true };
+
+  const red = clampByte(r / count);
+  const green = clampByte(g / count);
+  const blue = clampByte(b / count);
+  const luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255;
+
+  return {
+    color: `rgb(${red}, ${green}, ${blue})`,
+    light: luminance >= 0.58,
+  };
 }
 
 function cropSelectionFrame(
@@ -538,6 +660,65 @@ function getLongCapturePanelBounds(bounds: Bounds): Bounds {
     width: LONG_CAPTURE_PANEL_WIDTH,
     height: LONG_CAPTURE_PANEL_HEIGHT,
   };
+}
+
+function getOcrPanelBounds(bounds: Bounds): Bounds {
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  let left = bounds.left + bounds.width + OCR_PANEL_GAP;
+  if (left + OCR_PANEL_WIDTH + OCR_PANEL_MARGIN > viewportWidth) {
+    left = bounds.left - OCR_PANEL_WIDTH - OCR_PANEL_GAP;
+  }
+  if (left < OCR_PANEL_MARGIN) {
+    left = Math.max(
+      OCR_PANEL_MARGIN,
+      viewportWidth - OCR_PANEL_WIDTH - OCR_PANEL_MARGIN
+    );
+  }
+
+  const top = Math.max(
+    OCR_PANEL_MARGIN,
+    Math.min(
+      viewportHeight - OCR_PANEL_HEIGHT - OCR_PANEL_MARGIN,
+      bounds.top + (bounds.height - OCR_PANEL_HEIGHT) / 2
+    )
+  );
+
+  return {
+    left,
+    top,
+    width: OCR_PANEL_WIDTH,
+    height: OCR_PANEL_HEIGHT,
+  };
+}
+
+function getDefaultOcrTargetLanguage() {
+  const language = getSettings().language;
+  return language === "zh-CN" ? "zh-CN" : "en";
+}
+
+function getStoredOcrTargetLanguage() {
+  if (typeof localStorage === "undefined") return getDefaultOcrTargetLanguage();
+  const stored = localStorage.getItem(OCR_TARGET_LANGUAGE_STORAGE_KEY);
+  return TRANSLATION_LANGUAGES.some((language) => language.code === stored)
+    ? stored || getDefaultOcrTargetLanguage()
+    : getDefaultOcrTargetLanguage();
+}
+
+function setStoredOcrTargetLanguage(language: string) {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(OCR_TARGET_LANGUAGE_STORAGE_KEY, language);
+}
+
+function getOcrCopyText(result: OcrScanResult | null) {
+  if (!result) return "";
+  const text = result.text.trim();
+  if (text) return result.text;
+  return result.qrCodes.map((qrCode) => qrCode.value).join("\n");
+}
+
+async function translateTexts(texts: string[], targetLang: string) {
+  return invoke<string[]>("translate_texts", { texts, targetLang });
 }
 
 function getHandleCursor(handle: ResizeHandle) {
@@ -796,6 +977,15 @@ export default function ScreenshotWindow() {
   const [historyRevision, setHistoryRevision] = useState(0);
   const [selectedAnnotationRevision, setSelectedAnnotationRevision] =
     useState(0);
+  const [ocrPanel, setOcrPanel] = useState<OcrPanelState>(() => ({
+    status: "idle",
+    targetLang: getStoredOcrTargetLanguage(),
+    result: null,
+    displayText: "",
+    error: null,
+    showingTranslation: false,
+  }));
+  const [translationOverlayBusy, setTranslationOverlayBusy] = useState(false);
   const [longCapture, setLongCapture] = useState<LongCaptureState>({
     status: "idle",
     frameCount: 0,
@@ -1306,6 +1496,17 @@ export default function ScreenshotWindow() {
     bumpHistory();
   };
 
+  const clearOcrResult = () => {
+    setOcrPanel((current) => ({
+      status: "idle",
+      targetLang: current.targetLang,
+      result: null,
+      displayText: "",
+      error: null,
+      showingTranslation: false,
+    }));
+  };
+
   const resetEditor = () => {
     const canvas = fabricCanvasRef.current;
     canvas?.clear();
@@ -1351,6 +1552,8 @@ export default function ScreenshotWindow() {
     setToolbarPosition(null);
     setSelectionReady(false);
     setActiveTool("select");
+    clearOcrResult();
+    setTranslationOverlayBusy(false);
     setLongCapture({
       status: "idle",
       frameCount: 0,
@@ -1684,6 +1887,7 @@ export default function ScreenshotWindow() {
     });
     setSelectionReady(true);
     setActiveTool("select");
+    clearOcrResult();
     requestAnimationFrame(() => syncToolbarPosition(nextBounds));
   };
 
@@ -2545,6 +2749,249 @@ export default function ScreenshotWindow() {
     await closeCapture();
   };
 
+  const setOcrTargetLang = (targetLang: string) => {
+    setStoredOcrTargetLanguage(targetLang);
+    setOcrPanel((current) => ({
+      ...current,
+      targetLang,
+      displayText:
+        current.result && current.showingTranslation
+          ? getOcrCopyText(current.result)
+          : current.displayText,
+      showingTranslation: false,
+    }));
+  };
+
+  const runOcrOnSelection = async (openPanel = true) => {
+    if (openPanel) {
+      setOcrPanel((current) => ({
+        ...current,
+        status: "recognizing",
+        error: null,
+        showingTranslation: false,
+      }));
+    }
+
+    try {
+      const blob = await exportSelectionBlob();
+      if (!blob) throw new Error(t("screenshot.ocr.noSelection"));
+
+      const arrayBuffer = await blob.arrayBuffer();
+      const result = await invoke<OcrScanResult>("ocr_image", {
+        blobData: new Uint8Array(arrayBuffer),
+      });
+      const displayText = getOcrCopyText(result);
+
+      setOcrPanel((current) => ({
+        ...current,
+        status: "ready",
+        result,
+        displayText,
+        error: null,
+        showingTranslation: false,
+      }));
+
+      return { result, blob };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setOcrPanel((current) => ({
+        ...current,
+        status: "failed",
+        result: null,
+        displayText: "",
+        error: message || t("screenshot.ocr.failed"),
+        showingTranslation: false,
+      }));
+      return null;
+    }
+  };
+
+  const translateOcrPanelText = async () => {
+    const result = ocrPanel.result;
+    if (!result) return;
+
+    if (ocrPanel.showingTranslation) {
+      setOcrPanel((current) => ({
+        ...current,
+        status: "ready",
+        displayText: getOcrCopyText(result),
+        error: null,
+        showingTranslation: false,
+      }));
+      return;
+    }
+
+    const originalText = getOcrCopyText(result);
+    const lines = originalText.split("\n");
+    setOcrPanel((current) => ({
+      ...current,
+      status: "translating",
+      error: null,
+    }));
+
+    try {
+      const translated = await translateTexts(
+        lines.map((line) => line.trim()),
+        ocrPanel.targetLang
+      );
+      const translatedText = lines
+        .map((line, index) => (line.trim() ? translated[index] || "" : ""))
+        .join("\n");
+
+      setOcrPanel((current) => ({
+        ...current,
+        status: "ready",
+        displayText: translatedText,
+        error: null,
+        showingTranslation: true,
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setOcrPanel((current) => ({
+        ...current,
+        status: "ready",
+        error: message || t("screenshot.ocr.translateFailed"),
+      }));
+    }
+  };
+
+  const copyOcrText = async () => {
+    const text = ocrPanel.displayText || getOcrCopyText(ocrPanel.result);
+    if (!text.trim()) return;
+
+    await invoke("copy_text_to_clipboard", { text }).catch((error) => {
+      console.warn("Failed to copy OCR text:", error);
+    });
+  };
+
+  const removeTranslatedOverlay = () => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return false;
+
+    const objects = canvas.getObjects().filter(isTranslationOverlay);
+    if (objects.length === 0) return false;
+
+    if (objects.includes(selectedAnnotationRef.current as fabric.Object)) {
+      selectAnnotation(null);
+    }
+    objects.forEach((object) => canvas.remove(object));
+    pushHistory({ type: "remove", objects });
+    canvas.requestRenderAll();
+    return true;
+  };
+
+  const addTranslatedOverlay = async () => {
+    if (translationOverlayBusy) return;
+    if (removeTranslatedOverlay()) return;
+
+    setTranslationOverlayBusy(true);
+    setOcrPanel((current) => ({
+      ...current,
+      status: current.status === "idle" ? "recognizing" : "translating",
+      error: null,
+    }));
+
+    let objectUrl: string | null = null;
+    try {
+      const blob = await exportSelectionBlob();
+      if (!blob) throw new Error(t("screenshot.ocr.noSelection"));
+
+      const arrayBuffer = await blob.arrayBuffer();
+      const result = await invoke<OcrScanResult>("ocr_image", {
+        blobData: new Uint8Array(arrayBuffer),
+      });
+
+      if (result.blocks.length === 0) {
+        throw new Error(t("screenshot.ocr.noText"));
+      }
+
+      const translated = await translateTexts(
+        result.blocks.map((block) => block.text),
+        ocrPanel.targetLang
+      );
+      const { image, url } = await imageFromBlob(blob);
+      objectUrl = url;
+      const sampleCanvas = imageToCanvas(image);
+      const canvas = fabricCanvasRef.current;
+      const selection = selectionBoundsRef.current;
+      if (!canvas || !selection) {
+        throw new Error(t("screenshot.ocr.noSelection"));
+      }
+
+      const objects: fabric.Object[] = [];
+      result.blocks.forEach((block, index) => {
+        const translatedText = translated[index]?.trim();
+        if (!translatedText) return;
+
+        const padding = 2;
+        const left = selection.left + block.bounds.x * selection.width - padding;
+        const top = selection.top + block.bounds.y * selection.height - padding;
+        const width = Math.max(28, block.bounds.width * selection.width + padding * 2);
+        const height = Math.max(16, block.bounds.height * selection.height + padding * 2);
+        const sample = sampleAverageColor(sampleCanvas, block.bounds);
+        const textColor = sample.light ? "#111827" : "#ffffff";
+        const fontSize = Math.max(10, Math.min(30, height * 0.68));
+
+        const text = new fabric.Textbox(translatedText, {
+          left,
+          top,
+          width,
+          fill: textColor,
+          backgroundColor: sample.color,
+          fontSize,
+          fontFamily: "Inter, Arial, sans-serif",
+          fontWeight: "700",
+          lineHeight: 1.06,
+          splitByGrapheme: true,
+          editable: true,
+          selectable: true,
+          evented: true,
+          hasControls: false,
+          lockMovementX: false,
+          lockMovementY: false,
+          padding,
+          objectCaching: false,
+        });
+
+        objects.push(
+          markAnnotation(text, {
+            tool: "text",
+            source: "translation-overlay",
+            color: textColor,
+            fontSize,
+          })
+        );
+      });
+
+      if (objects.length === 0) {
+        throw new Error(t("screenshot.ocr.translateFailed"));
+      }
+
+      objects.forEach((object) => canvas.add(object));
+      bringSelectionHandlesToFront();
+      pushHistory({ type: "add", objects });
+      canvas.requestRenderAll();
+      setOcrPanel((current) => ({
+        ...current,
+        status: "ready",
+        result,
+        displayText: getOcrCopyText(result),
+        error: null,
+        showingTranslation: false,
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setOcrPanel((current) => ({
+        ...current,
+        status: "failed",
+        error: message || t("screenshot.ocr.translateFailed"),
+      }));
+    } finally {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      setTranslationOverlayBusy(false);
+    }
+  };
+
   useEffect(() => {
     if (!canvasElementRef.current) return;
 
@@ -2865,6 +3312,7 @@ export default function ScreenshotWindow() {
           return;
         }
 
+        clearOcrResult();
         cursorManager.setCursor("default");
         return;
       }
@@ -3202,6 +3650,32 @@ export default function ScreenshotWindow() {
           <button
             className="tool-button"
             type="button"
+            title={t("screenshot.tools.ocr")}
+            disabled={ocrPanel.status === "recognizing"}
+            onClick={() => void runOcrOnSelection(true)}
+          >
+            {ocrPanel.status === "recognizing" ? (
+              <Loader2 className="spin-icon" size={18} />
+            ) : (
+              <FileText size={18} />
+            )}
+          </button>
+          <button
+            className="tool-button"
+            type="button"
+            title={t("screenshot.tools.translateOverlay")}
+            disabled={translationOverlayBusy}
+            onClick={() => void addTranslatedOverlay()}
+          >
+            {translationOverlayBusy ? (
+              <Loader2 className="spin-icon" size={18} />
+            ) : (
+              <Languages size={18} />
+            )}
+          </button>
+          <button
+            className="tool-button"
+            type="button"
             title={t("screenshot.tools.download")}
             onClick={() => void downloadCapture()}
           >
@@ -3233,6 +3707,8 @@ export default function ScreenshotWindow() {
     isLongCaptureActive,
     isLongCaptureResultReady,
     markerColor,
+    ocrPanel.status,
+    ocrPanel.targetLang,
     selectionReady,
     selectedAnnotationRevision,
     strokeColor,
@@ -3240,6 +3716,7 @@ export default function ScreenshotWindow() {
     t,
     textSize,
     toolbarPosition,
+    translationOverlayBusy,
   ]);
 
   const longCapturePanelStyle = useMemo<CSSProperties | undefined>(() => {
@@ -3249,6 +3726,116 @@ export default function ScreenshotWindow() {
     const panelBounds = getLongCapturePanelBounds(bounds);
     return { left: panelBounds.left, top: panelBounds.top };
   }, [isLongCaptureActive, longCapture.frameCount]);
+
+  const ocrPanelStyle = useMemo<CSSProperties | undefined>(() => {
+    const bounds = selectionBoundsRef.current;
+    if (ocrPanel.status === "idle" || !bounds) return undefined;
+
+    const panelBounds = getOcrPanelBounds(bounds);
+    return { left: panelBounds.left, top: panelBounds.top };
+  }, [ocrPanel.status, selectionReady, selectedAnnotationRevision]);
+
+  const isOcrBusy =
+    ocrPanel.status === "recognizing" || ocrPanel.status === "translating";
+  const ocrPanelView =
+    ocrPanel.status !== "idle" ? (
+      <div className="ocr-panel" style={ocrPanelStyle}>
+        <div className="ocr-panel-header">
+          <div className="ocr-panel-title">
+            {isOcrBusy ? (
+              <Loader2 className="spin-icon" size={17} />
+            ) : (
+              <FileText size={17} />
+            )}
+            <span>{t("screenshot.ocr.title")}</span>
+          </div>
+          <button
+            className="ocr-icon-button"
+            type="button"
+            title={t("screenshot.ocr.close")}
+            onClick={clearOcrResult}
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="ocr-panel-actions">
+          <select
+            className="ocr-language-select"
+            value={ocrPanel.targetLang}
+            onChange={(event) => setOcrTargetLang(event.target.value)}
+            title={t("screenshot.ocr.targetLanguage")}
+          >
+            {TRANSLATION_LANGUAGES.map((language) => (
+              <option key={language.code} value={language.code}>
+                {language.name}
+              </option>
+            ))}
+          </select>
+          <button
+            className="ocr-action-button"
+            type="button"
+            disabled={!ocrPanel.result || isOcrBusy}
+            onClick={() => void translateOcrPanelText()}
+          >
+            <Languages size={15} />
+            <span>
+              {ocrPanel.showingTranslation
+                ? t("screenshot.ocr.showOriginal")
+                : t("screenshot.ocr.translate")}
+            </span>
+          </button>
+          <button
+            className="ocr-action-button"
+            type="button"
+            disabled={!ocrPanel.displayText.trim()}
+            onClick={() => void copyOcrText()}
+          >
+            <Copy size={15} />
+            <span>{t("screenshot.ocr.copy")}</span>
+          </button>
+        </div>
+
+        <textarea
+          className="ocr-textarea"
+          value={ocrPanel.displayText}
+          placeholder={
+            ocrPanel.status === "recognizing"
+              ? t("screenshot.ocr.recognizing")
+              : t("screenshot.ocr.empty")
+          }
+          onChange={(event) =>
+            setOcrPanel((current) => ({
+              ...current,
+              displayText: event.target.value,
+            }))
+          }
+        />
+
+        {ocrPanel.result && ocrPanel.result.qrCodes.length > 0 && (
+          <div className="ocr-qr-list">
+            <div className="ocr-qr-title">{t("screenshot.ocr.qrCodes")}</div>
+            {ocrPanel.result.qrCodes.map((qrCode) => (
+              <button
+                className="ocr-qr-item"
+                key={qrCode.value}
+                type="button"
+                title={qrCode.value}
+                onClick={() =>
+                  void invoke("copy_text_to_clipboard", {
+                    text: qrCode.value,
+                  })
+                }
+              >
+                {qrCode.value}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {ocrPanel.error && <div className="ocr-panel-error">{ocrPanel.error}</div>}
+      </div>
+    ) : null;
 
   const longCapturePanel = isLongCaptureActive ? (
     <div
@@ -3296,6 +3883,7 @@ export default function ScreenshotWindow() {
     <div className="screenshot-root">
       <canvas ref={canvasElementRef} className="screenshot-canvas" />
       {longCapturePanel}
+      {ocrPanelView}
       {toolbar}
     </div>
   );

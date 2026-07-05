@@ -20,6 +20,7 @@ xshot is a desktop screenshot tool for quick capture, window/region selection, a
 
 - ✅ Supports scrolling capture.
 - ✅ Supports pinning capture results as always-on-top floating windows.
+- ✅ Supports OCR text recognition, QR recognition, text translation, and translation overlay.
 - ✅ Supports annotation tools: number marker, arrow, rectangle, line, text, pen, eraser, and mosaic area.
 - ✅ Supports window hover detection: move over a candidate window and click to select it.
 
@@ -35,6 +36,7 @@ After launch, xshot runs from the tray. You can start a capture by:
 - If the app still cannot be opened, run `xattr -dr com.apple.quarantine /Applications/xshot.app` and try again.
 - On macOS, the first capture may require Screen Recording permission; restart the app after granting it.
 - On macOS, scrolling capture requires Accessibility permission to monitor/filter wheel events and let the window under the selection receive scrolling.
+- OCR uses macOS Vision; translation requires network access and uses Google Translate by default.
 - Dock icon visibility is macOS-only.
 - The current capture path targets the primary display. Multi-monitor support is still being improved.
 - Window hover detection depends on system window enumeration, so some system windows, overlays, or fullscreen apps may behave differently.
@@ -58,6 +60,8 @@ After launch, xshot runs from the tray. You can start a capture by:
 - Scrolling capture stitches by estimating the real vertical offset between frames and appending only the new rows. Tiny shifts do not update the previous frame, which avoids over-appending on repeated textures or blank areas.
 - After rendering, long screenshots enter the crop/edit view; copy and save export the current crop.
 - Pinning writes the current exported PNG to a temporary directory, then creates a borderless, always-on-top, all-workspaces Tauri window to display it.
+- OCR uses macOS Vision `VNRecognizeTextRequest`, preferring accurate recognition and falling back to fast recognition; QR detection uses `VNDetectBarcodesRequest`.
+- Translation is handled by the Rust backend through Google Translate and supports system proxy settings. Translation overlay creates editable, undoable text annotations from OCR block coordinates; clicking the overlay tool again removes the generated overlay.
 - Capture timing logs are intentionally kept to profile shortcut handling, screen capture, image decoding, and window presentation.
 - ScreenCaptureKit was tested earlier, but the quality and latency tradeoff was not good enough for the main path, so the stable fallback remains the default.
 
@@ -91,7 +95,9 @@ src/                    React frontend
 src/windows/            Screenshot window
 src/logic/              Settings, shortcuts, cursor helpers
 src-tauri/              Tauri / Rust backend
-src-tauri/src/lib.rs    Capture, tray, clipboard, window commands
+src-tauri/src/lib.rs    Capture, tray, clipboard, command registration
+src-tauri/src/ocr.rs    macOS Vision OCR / QR recognition
+src-tauri/src/translation.rs  Translation service
 public/                 Image assets
 ```
 
@@ -99,6 +105,7 @@ public/                 Image assets
 
 - Multi-monitor support is still incomplete.
 - Scrolling capture is currently macOS-first and depends on Screen Recording and Accessibility permissions. It currently supports downward stitching only.
+- OCR is currently macOS-first; translation depends on network access and Google Translate availability.
 - Annotation property edits are applied immediately but are not yet tracked as standalone undo actions.
 - Advanced settings such as image format selection, launch options, and toolbar customization are not exposed yet.
 - Window capture depends on candidate window detection; a few transparent windows, system overlays, or fullscreen spaces may not be matched accurately.

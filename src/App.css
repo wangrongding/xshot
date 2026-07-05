@@ -755,6 +755,152 @@ body.long-capture-panel-snapshot-mode .long-capture-panel {
   text-align: center;
 }
 
+.ocr-panel {
+  position: fixed;
+  z-index: 11;
+  display: grid;
+  width: 430px;
+  max-width: calc(100vw - 32px);
+  max-height: 430px;
+  grid-template-rows: auto auto minmax(120px, 1fr) auto auto;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(24, 29, 34, 0.95);
+  color: #edf3f8;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.36);
+  backdrop-filter: blur(16px);
+}
+
+.ocr-panel-header,
+.ocr-panel-title,
+.ocr-panel-actions {
+  display: flex;
+  align-items: center;
+}
+
+.ocr-panel-header {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ocr-panel-title {
+  min-width: 0;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.ocr-panel-actions {
+  gap: 6px;
+}
+
+.ocr-language-select,
+.ocr-action-button,
+.ocr-icon-button {
+  height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #edf3f8;
+}
+
+.ocr-language-select {
+  min-width: 118px;
+  padding: 0 8px;
+}
+
+.ocr-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.ocr-icon-button {
+  display: inline-grid;
+  width: 30px;
+  padding: 0;
+  place-items: center;
+}
+
+.ocr-action-button:hover,
+.ocr-icon-button:hover,
+.ocr-language-select:hover {
+  border-color: rgba(255, 255, 255, 0.26);
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.ocr-action-button:disabled {
+  opacity: 0.45;
+}
+
+.ocr-textarea {
+  width: 100%;
+  min-height: 150px;
+  resize: none;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.22);
+  color: #f7fbff;
+  font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", monospace;
+  outline: none;
+}
+
+.ocr-textarea:focus {
+  border-color: rgba(22, 119, 255, 0.62);
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.18);
+}
+
+.ocr-qr-list {
+  display: grid;
+  gap: 5px;
+}
+
+.ocr-qr-title {
+  color: #b9c4cf;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.ocr-qr-item {
+  overflow: hidden;
+  height: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 0 8px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #edf3f8;
+  font: 12px/28px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", monospace;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocr-panel-error {
+  min-height: 17px;
+  color: #ffb3b4;
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.spin-icon {
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .capture-toolbar {
   position: fixed;
   left: 50%;

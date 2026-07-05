@@ -9,6 +9,9 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindo
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use xcap::{Monitor, Window};
 
+mod ocr;
+mod translation;
+
 #[derive(Debug, Serialize)]
 struct CaptureWindowRegion {
     id: u32,
@@ -707,6 +710,13 @@ async fn copy_to_clipboard(app: AppHandle, blob_data: Vec<u8>) -> Result<(), Str
 }
 
 #[tauri::command]
+async fn copy_text_to_clipboard(app: AppHandle, text: String) -> Result<(), String> {
+    app.clipboard()
+        .write_text(text)
+        .map_err(|e| format!("Failed to write text to clipboard: {}", e))
+}
+
+#[tauri::command]
 async fn save_to_downloads(
     blob_data: Vec<u8>,
     directory: Option<String>,
@@ -1387,6 +1397,9 @@ pub fn run() {
             capture_screen_rect_below_screenshot_window,
             list_capture_windows,
             copy_to_clipboard,
+            copy_text_to_clipboard,
+            ocr::ocr_image,
+            translation::translate_texts,
             save_to_downloads,
             show_pin_window,
             get_pin_window_payload,
