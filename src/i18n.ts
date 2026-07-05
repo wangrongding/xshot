@@ -79,7 +79,14 @@ export const resources = {
           redo: "重做",
           longCapture: "截长图",
           download: "下载",
+          pin: "固定到屏幕",
           copy: "复制到剪贴板",
+        },
+        pin: {
+          copy: "复制",
+          save: "保存",
+          close: "关闭",
+          resetZoom: "重置缩放",
         },
         longCapture: {
           title: "截长图",
@@ -187,7 +194,14 @@ export const resources = {
           redo: "Redo",
           longCapture: "Scrolling capture",
           download: "Download",
+          pin: "Pin to screen",
           copy: "Copy to clipboard",
+        },
+        pin: {
+          copy: "Copy",
+          save: "Save",
+          close: "Close",
+          resetZoom: "Reset zoom",
         },
         longCapture: {
           title: "Scrolling capture",

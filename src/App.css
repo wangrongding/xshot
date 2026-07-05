@@ -892,6 +892,118 @@ body.long-capture-panel-snapshot-mode .long-capture-panel {
   background: currentColor;
 }
 
+.pin-window-shell {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+}
+
+.pin-window-frame {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.34);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.pin-window-image {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  object-fit: fill;
+  pointer-events: none;
+}
+
+.pin-window-controls {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.pin-window-shell:hover .pin-window-controls,
+.pin-window-controls:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.pin-window-button,
+.pin-window-zoom {
+  display: inline-grid;
+  height: 26px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(18, 24, 30, 0.72);
+  color: #ffffff;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
+  backdrop-filter: blur(12px);
+}
+
+.pin-window-button {
+  width: 26px;
+  padding: 0;
+}
+
+.pin-window-zoom {
+  min-width: 48px;
+  padding: 0 8px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 720;
+}
+
+.pin-window-button:hover,
+.pin-window-zoom:hover {
+  border-color: rgba(255, 255, 255, 0.32);
+  background: rgba(18, 24, 30, 0.88);
+}
+
+.pin-window-button.danger:hover {
+  border-color: rgba(255, 122, 122, 0.5);
+  background: rgba(153, 27, 27, 0.82);
+}
+
+.pin-context-menu {
+  position: fixed;
+  z-index: 4;
+  display: grid;
+  min-width: 132px;
+  padding: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(22, 28, 34, 0.96);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(14px);
+}
+
+.pin-context-menu button {
+  display: flex;
+  height: 30px;
+  align-items: center;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #eef3f7;
+  font-size: 12px;
+  font-weight: 650;
+  text-align: left;
+}
+
+.pin-context-menu button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
 @media (max-width: 760px) {
   .capture-toolbar {
     flex-wrap: wrap;

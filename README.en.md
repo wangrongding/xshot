@@ -12,7 +12,7 @@
   <strong>Lightweight, tray-first desktop screenshot tool.</strong>
 </p>
 
-xshot is a desktop screenshot tool for quick capture, window/region selection, annotation, scrolling capture, crop, clipboard copy, and PNG saving. It is designed to be used from the tray and a global shortcut.
+xshot is a desktop screenshot tool for quick capture, window/region selection, annotation, scrolling capture, crop, pin-to-screen, clipboard copy, and PNG saving. It is designed to be used from the tray and a global shortcut.
 
 ## Core Features
 
@@ -24,7 +24,8 @@ xshot is a desktop screenshot tool for quick capture, window/region selection, a
 - Window hover detection: move over a candidate window and click to select that window region.
 - Manual region selection with move and corner resize controls.
 - Manual downward scrolling capture: capture the selected region frame by frame, stitch automatically, and preview live.
-- Long screenshots can be cropped after rendering before copying or saving.
+- Long screenshots can be cropped after rendering before copying, pinning, or saving.
+- Capture results can be pinned as always-on-top floating windows with drag, wheel zoom, copy, save, and close controls.
 - Selection-following toolbar with copy-to-clipboard and PNG download actions, positioned away from the top safe area.
 - Built-in Simplified Chinese and English UI.
 
@@ -58,6 +59,7 @@ During capture:
 - Click the scrolling capture button to show the floating preview panel beside the selection. Scroll downward inside the selection; after scrolling settles, xshot samples and stitches automatically. Reverse and horizontal scrolling are ignored to avoid corrupting the stitch.
 - The scrolling capture panel only shows live preview and shortcuts: `Enter` renders the long screenshot, `Esc` cancels.
 - After rendering, the long screenshot returns to the editor. Resize the selection handles to crop it; copy and download export the current crop.
+- The pin button pins the current capture/crop to the screen. The pinned window can be dragged, zoomed with the wheel, and right-clicked to copy, save, or close.
 - `Enter` or the confirm button copies the current capture/crop to the clipboard.
 - The download button saves a PNG.
 - `Esc` or the close button cancels the capture.
@@ -88,6 +90,7 @@ During capture:
 - On macOS, scrolling capture makes the screenshot window mouse-transparent and only passes downward wheel events through. Frames are captured with CoreGraphics `CGWindowListCreateImage` below the screenshot window, with `screencapture -R` as fallback.
 - Scrolling capture stitches by estimating the real vertical offset between frames and appending only the new rows. Tiny shifts do not update the previous frame, which avoids over-appending on repeated textures or blank areas.
 - After rendering, long screenshots enter the crop/edit view; copy and save export the current crop.
+- Pinning writes the current exported PNG to a temporary directory, then creates a borderless, always-on-top, all-workspaces Tauri window to display it.
 - Capture timing logs are intentionally kept to profile shortcut handling, screen capture, image decoding, and window presentation.
 - ScreenCaptureKit was tested earlier, but the quality and latency tradeoff was not good enough for the main path, so the stable fallback remains the default.
 

@@ -17,6 +17,7 @@ import {
   Grid3X3,
   Palette,
   PenLine,
+  Pin,
   Pointer,
   Redo2,
   RectangleHorizontal,
@@ -2498,6 +2499,17 @@ export default function ScreenshotWindow() {
     await closeCapture();
   };
 
+  const pinCapture = async () => {
+    const blob = await exportSelectionBlob();
+    if (!blob) return;
+
+    const arrayBuffer = await blob.arrayBuffer();
+    await invoke("show_pin_window", {
+      blobData: new Uint8Array(arrayBuffer),
+    });
+    await closeCapture();
+  };
+
   useEffect(() => {
     if (!canvasElementRef.current) return;
 
@@ -3149,6 +3161,14 @@ export default function ScreenshotWindow() {
             onClick={() => void downloadCapture()}
           >
             <Download size={18} />
+          </button>
+          <button
+            className="tool-button"
+            type="button"
+            title={t("screenshot.tools.pin")}
+            onClick={() => void pinCapture()}
+          >
+            <Pin size={18} />
           </button>
           <button
             className="tool-button primary"

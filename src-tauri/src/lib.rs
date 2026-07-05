@@ -1,6 +1,8 @@
 #[cfg(not(target_os = "macos"))]
 use image::ImageEncoder;
 use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -41,6 +43,19 @@ struct LongCaptureScrollEvent {
     delta_x: f64,
     delta_y: f64,
 }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PinWindowPayload {
+    image_path: String,
+    image_width: f64,
+    image_height: f64,
+    initial_width: f64,
+    initial_height: f64,
+}
+
+#[derive(Default)]
+struct PinWindowStore(Mutex<HashMap<String, PinWindowPayload>>);
 
 #[cfg(target_os = "macos")]
 thread_local! {
@@ -723,6 +738,162 @@ async fn save_to_downloads(
     Ok(path.to_string_lossy().to_string())
 }
 
+fn pin_window_temp_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("xshot-pins")
+}
+
+fn compute_pin_window_size(
+    app: &AppHandle,
+    image_width: f64,
+    image_height: f64,
+) -> (f64, f64, f64, f64) {
+    let fallback_width = 720.0;
+    let fallback_height = 480.0;
+    let safe_width = image_width.max(1.0);
+    let safe_height = image_height.max(1.0);
+    let monitor = app
+        .get_webview_window("screenshot_window")
+        .and_then(|window| window.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten());
+
+    let Some(monitor) = monitor else {
+        let scale = f64::min(
+            1.0,
+            f64::min(fallback_width / safe_width, fallback_height / safe_height),
+        );
+        return (
+            (safe_width * scale).round().max(96.0),
+            (safe_height * scale).round().max(64.0),
+            80.0,
+            80.0,
+        );
+    };
+
+    let work_area = monitor.work_area();
+    let scale_factor = monitor.scale_factor().max(1.0);
+    let work_x = work_area.position.x as f64 / scale_factor;
+    let work_y = work_area.position.y as f64 / scale_factor;
+    let work_width = work_area.size.width as f64 / scale_factor;
+    let work_height = work_area.size.height as f64 / scale_factor;
+    let max_width = (work_width * 0.8).max(96.0);
+    let max_height = (work_height * 0.8).max(64.0);
+    let scale = f64::min(
+        1.0,
+        f64::min(max_width / safe_width, max_height / safe_height),
+    );
+    let initial_width = (safe_width * scale).round().max(96.0);
+    let initial_height = (safe_height * scale).round().max(64.0);
+    let x = work_x + (work_width - initial_width) / 2.0;
+    let y = work_y + (work_height - initial_height) / 2.0;
+
+    (initial_width, initial_height, x, y)
+}
+
+fn cleanup_pin_payload(app: &AppHandle, label: &str) {
+    let store = app.state::<PinWindowStore>();
+    let payload = store
+        .0
+        .lock()
+        .ok()
+        .and_then(|mut payloads| payloads.remove(label));
+
+    if let Some(payload) = payload {
+        let _ = std::fs::remove_file(payload.image_path);
+    }
+}
+
+#[tauri::command]
+async fn show_pin_window(app: AppHandle, blob_data: Vec<u8>) -> Result<(), String> {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let image = image::load_from_memory(&blob_data)
+        .map_err(|e| format!("Failed to decode pinned image: {}", e))?;
+    let image_width = image.width() as f64;
+    let image_height = image.height() as f64;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis();
+    let label = format!("pin_window_{}_{}", std::process::id(), timestamp);
+    let pin_dir = pin_window_temp_dir();
+    fs::create_dir_all(&pin_dir).map_err(|e| format!("Failed to prepare pin directory: {}", e))?;
+    let image_path = pin_dir.join(format!("{}.png", label));
+    fs::write(&image_path, &blob_data)
+        .map_err(|e| format!("Failed to write pinned image: {}", e))?;
+
+    let (initial_width, initial_height, x, y) =
+        compute_pin_window_size(&app, image_width, image_height);
+    let payload = PinWindowPayload {
+        image_path: image_path.to_string_lossy().to_string(),
+        image_width,
+        image_height,
+        initial_width,
+        initial_height,
+    };
+
+    {
+        let store = app.state::<PinWindowStore>();
+        store
+            .0
+            .lock()
+            .map_err(|_| "Failed to lock pin window store".to_string())?
+            .insert(label.clone(), payload);
+    }
+
+    let build_result = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("/pin".into()))
+        .title("Pinned Screenshot")
+        .visible(false)
+        .decorations(false)
+        .resizable(false)
+        .minimizable(false)
+        .maximizable(false)
+        .always_on_top(true)
+        .visible_on_all_workspaces(true)
+        .skip_taskbar(true)
+        .transparent(true)
+        .shadow(true)
+        .inner_size(initial_width, initial_height)
+        .min_inner_size(96.0, 64.0)
+        .position(x, y)
+        .build();
+
+    match build_result {
+        Ok(window) => {
+            let _ = window.set_always_on_top(true);
+            Ok(())
+        }
+        Err(error) => {
+            cleanup_pin_payload(&app, &label);
+            Err(error.to_string())
+        }
+    }
+}
+
+#[tauri::command]
+fn get_pin_window_payload(app: AppHandle, label: String) -> Result<PinWindowPayload, String> {
+    let store = app.state::<PinWindowStore>();
+    let payload = store
+        .0
+        .lock()
+        .map_err(|_| "Failed to lock pin window store".to_string())?
+        .get(&label)
+        .cloned();
+
+    payload.ok_or_else(|| "Pinned image not found".to_string())
+}
+
+#[tauri::command]
+async fn close_pin_window(app: AppHandle, label: String) -> Result<(), String> {
+    cleanup_pin_payload(&app, &label);
+
+    if let Some(window) = app.get_webview_window(&label) {
+        window.close().map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
 fn macos_accessibility_trusted() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -1217,6 +1388,9 @@ pub fn run() {
             list_capture_windows,
             copy_to_clipboard,
             save_to_downloads,
+            show_pin_window,
+            get_pin_window_payload,
+            close_pin_window,
             ensure_screenshot_window,
             set_dock_icon_visible,
             finish_capture,
@@ -1232,6 +1406,9 @@ pub fn run() {
             stop_long_capture_scroll_monitor
         ])
         .setup(|app| {
+            let _ = std::fs::remove_dir_all(pin_window_temp_dir());
+            app.manage(PinWindowStore::default());
+
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 ensure_screenshot_window(handle).await.unwrap();
@@ -1276,6 +1453,11 @@ pub fn run() {
                 if window.label() == "main" {
                     let _ = window.hide();
                     api.prevent_close();
+                }
+            }
+            if let tauri::WindowEvent::Destroyed = event {
+                if window.label().starts_with("pin_window_") {
+                    cleanup_pin_payload(window.app_handle(), window.label());
                 }
             }
         })

@@ -33,6 +33,7 @@ import {
   type AppSettings,
   type AppLanguage,
 } from "./logic/settings";
+import PinWindow from "./windows/Pin";
 import ScreenshotWindow from "./windows/Screenshot";
 import "./App.css";
 
@@ -139,6 +140,10 @@ function App() {
 
   if (path === "/screenshot") {
     return <ScreenshotWindow />;
+  }
+
+  if (path === "/pin") {
+    return <PinWindow />;
   }
 
   // 主窗口逻辑（通常隐藏在托盘）
