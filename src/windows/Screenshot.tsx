@@ -1,7 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import { useTranslation } from "react-i18next";
 import {
   Check,
@@ -39,6 +46,7 @@ type SelectionDragState =
   | { mode: "resize"; start: Point; initial: Bounds; handle: ResizeHandle };
 type CaptureWindowRegion = Bounds & {
   id: number;
+  pid: number;
   title: string;
   appName: string;
   isFullscreenLike: boolean;
@@ -47,6 +55,7 @@ type CaptureWindowRegion = Bounds & {
 };
 type RawCaptureWindowRegion = {
   id: number;
+  pid: number;
   x: number;
   y: number;
   width: number;
@@ -72,6 +81,25 @@ type EditorTool =
 type AnnotationTool = Exclude<EditorTool, "select" | "eraser">;
 type StrokeTool = Extract<EditorTool, "pen" | "arrow" | "rect" | "line">;
 type TextTool = Extract<EditorTool, "text">;
+type LongCaptureStatus = "idle" | "waiting" | "capturing" | "ready" | "failed";
+type LongCaptureState = {
+  status: LongCaptureStatus;
+  frameCount: number;
+  height: number;
+  messageKey: string | null;
+};
+type MacosPermissionStatus = {
+  macos: boolean;
+  accessibility: boolean;
+  eventPosting: boolean;
+  screenRecording: boolean;
+};
+type LongCaptureScrollEvent = {
+  x: number;
+  y: number;
+  deltaX: number;
+  deltaY: number;
+};
 type AnnotationData = {
   role: "annotation";
   tool: AnnotationTool;
@@ -94,9 +122,25 @@ const SELECTION_HANDLE_SIZE = 9;
 const SELECTION_HANDLE_HIT_SIZE = 12;
 const SELECTION_EDGE_HIT_SIZE = 7;
 const TOOLBAR_MARGIN = 10;
+const TOOLBAR_SAFE_TOP = 76;
 const DEFAULT_TOOLBAR_WIDTH = 560;
 const DEFAULT_TOOLBAR_HEIGHT = 54;
 const WINDOW_CLICK_DRAG_THRESHOLD = 5;
+const LONG_CAPTURE_MANUAL_CAPTURE_INTERVAL = 150;
+const LONG_CAPTURE_SCROLL_SETTLE_DELAY = 250;
+const LONG_CAPTURE_MAX_HEIGHT = 30000;
+const LONG_CAPTURE_MIN_OVERLAP = 32;
+const LONG_CAPTURE_MATCH_THRESHOLD = 28;
+const LONG_CAPTURE_MIN_SHIFT_RATIO = 0.1;
+const LONG_CAPTURE_MIN_OVERLAP_RATIO = 0.2;
+const LONG_CAPTURE_OFFSET_SCORE_BIAS = 6;
+const LONG_CAPTURE_SHORTCUTS = ["Enter", "Escape"];
+const LONG_CAPTURE_PREVIEW_WIDTH = 152;
+const LONG_CAPTURE_PREVIEW_HEIGHT = 240;
+const LONG_CAPTURE_PANEL_WIDTH = 380;
+const LONG_CAPTURE_PANEL_HEIGHT = 262;
+const LONG_CAPTURE_PANEL_GAP = 14;
+const LONG_CAPTURE_PANEL_MARGIN = 16;
 const RESIZE_HANDLES: ResizeHandle[] = [
   "nw",
   "n",
@@ -117,6 +161,14 @@ const SequenceToolIcon = createLucideIcon("SequenceToolIcon", [
 const ArrowToolIcon = createLucideIcon("ArrowToolIcon", [
   ["path", { d: "M6 18 18 6" }],
   ["path", { d: "M10 6h8v8" }],
+]);
+
+const LongCaptureIcon = createLucideIcon("LongCaptureIcon", [
+  ["path", { d: "M8 4h8" }],
+  ["path", { d: "M8 20h8" }],
+  ["rect", { x: "7", y: "7", width: "10", height: "10", rx: "1.5" }],
+  ["path", { d: "M12 10v4" }],
+  ["path", { d: "m9.75 12.75 2.25 2.25 2.25-2.25" }],
 ]);
 
 const TOOL_BUTTONS: Array<{
@@ -164,12 +216,247 @@ function logCaptureTiming(start: number, label: string) {
   );
 }
 
+function logLongCaptureDebug(label: string, payload?: Record<string, unknown>) {
+  if (!import.meta.env.DEV) return;
+  if (payload) console.debug(`[xshot] long capture ${label}`, payload);
+  else console.debug(`[xshot] long capture ${label}`);
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function waitForNextPaint() {
+  return new Promise<void>((resolve) =>
+    window.requestAnimationFrame(() =>
+      window.requestAnimationFrame(() => resolve())
+    )
+  );
+}
+
+function makeCanvas(width: number, height: number) {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width));
+  canvas.height = Math.max(1, Math.round(height));
+  return canvas;
+}
+
+function cloneCanvas(source: HTMLCanvasElement) {
+  const canvas = makeCanvas(source.width, source.height);
+  const context = canvas.getContext("2d");
+  context?.drawImage(source, 0, 0);
+  return canvas;
+}
+
+function imageToCanvas(image: HTMLImageElement) {
+  const canvas = makeCanvas(
+    image.naturalWidth || image.width,
+    image.naturalHeight || image.height
+  );
+  const context = canvas.getContext("2d");
+  context?.drawImage(image, 0, 0);
+  return canvas;
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement) {
+  return new Promise<Blob | null>((resolve) =>
+    canvas.toBlob((blob) => resolve(blob), "image/png")
+  );
+}
+
+async function imageFromBlob(blob: Blob) {
+  const url = URL.createObjectURL(blob);
+  const image = new Image();
+  image.src = url;
+  await image.decode();
+  return { image, url };
+}
+
+function cropSelectionFrame(
+  image: HTMLImageElement,
+  bounds: Bounds,
+  scale: number
+) {
+  const sourceX = Math.max(0, Math.round(bounds.left / scale));
+  const sourceY = Math.max(0, Math.round(bounds.top / scale));
+  const sourceWidth = Math.max(1, Math.round(bounds.width / scale));
+  const sourceHeight = Math.max(1, Math.round(bounds.height / scale));
+  const frame = makeCanvas(sourceWidth, sourceHeight);
+  const context = frame.getContext("2d");
+  if (!context) return null;
+
+  context.drawImage(
+    image,
+    sourceX,
+    sourceY,
+    sourceWidth,
+    sourceHeight,
+    0,
+    0,
+    sourceWidth,
+    sourceHeight
+  );
+
+  return frame;
+}
+
+function scoreVerticalOverlap(
+  previousData: Uint8ClampedArray,
+  currentData: Uint8ClampedArray,
+  width: number,
+  previousHeight: number,
+  overlap: number
+) {
+  const xStep = Math.max(4, Math.floor(width / 160));
+  const yStep = Math.max(4, Math.floor(overlap / 90));
+  const previousStartY = previousHeight - overlap;
+  let diff = 0;
+  let samples = 0;
+
+  for (let y = 0; y < overlap; y += yStep) {
+    const previousY = previousStartY + y;
+    for (let x = 0; x < width; x += xStep) {
+      const previousIndex = (previousY * width + x) * 4;
+      const currentIndex = (y * width + x) * 4;
+      diff += Math.abs(previousData[previousIndex] - currentData[currentIndex]);
+      diff += Math.abs(
+        previousData[previousIndex + 1] - currentData[currentIndex + 1]
+      );
+      diff += Math.abs(
+        previousData[previousIndex + 2] - currentData[currentIndex + 2]
+      );
+      samples += 1;
+    }
+  }
+
+  return samples === 0 ? Number.POSITIVE_INFINITY : diff / samples / 3;
+}
+
+function findVerticalScrollOffset(
+  previousFrame: HTMLCanvasElement,
+  currentFrame: HTMLCanvasElement
+) {
+  const width = Math.min(previousFrame.width, currentFrame.width);
+  const height = Math.min(previousFrame.height, currentFrame.height);
+  const minOverlap = Math.max(
+    LONG_CAPTURE_MIN_OVERLAP,
+    Math.floor(height * LONG_CAPTURE_MIN_OVERLAP_RATIO)
+  );
+  const maxOffset = height - minOverlap;
+  const minShift = Math.max(
+    1,
+    Math.floor(height * LONG_CAPTURE_MIN_SHIFT_RATIO)
+  );
+  if (width <= 0 || maxOffset < 1) {
+    return {
+      offset: 0,
+      minShift,
+      overlap: 0,
+      score: Number.POSITIVE_INFINITY,
+      matched: false,
+      tooSmall: false,
+    };
+  }
+
+  const previousContext = previousFrame.getContext("2d");
+  const currentContext = currentFrame.getContext("2d");
+  if (!previousContext || !currentContext) {
+    return {
+      offset: 0,
+      minShift,
+      overlap: 0,
+      score: Number.POSITIVE_INFINITY,
+      matched: false,
+      tooSmall: false,
+    };
+  }
+
+  const previousData = previousContext.getImageData(
+    0,
+    0,
+    width,
+    previousFrame.height
+  ).data;
+  const currentData = currentContext.getImageData(
+    0,
+    0,
+    width,
+    currentFrame.height
+  ).data;
+  const scoreOffset = (offset: number) => {
+    const overlap = height - offset;
+    const score = scoreVerticalOverlap(
+      previousData,
+      currentData,
+      width,
+      previousFrame.height,
+      overlap
+    );
+    return {
+      offset,
+      overlap,
+      score,
+      adjustedScore:
+        score + (offset / Math.max(1, height)) * LONG_CAPTURE_OFFSET_SCORE_BIAS,
+    };
+  };
+
+  const coarseStep = Math.max(1, Math.floor(height / 120));
+  let bestOffset = 0;
+  let bestOverlap = 0;
+  let bestScore = Number.POSITIVE_INFINITY;
+  let bestAdjustedScore = Number.POSITIVE_INFINITY;
+
+  const consider = (candidate: ReturnType<typeof scoreOffset>) => {
+    if (
+      candidate.adjustedScore < bestAdjustedScore ||
+      (candidate.adjustedScore === bestAdjustedScore &&
+        candidate.offset < bestOffset)
+    ) {
+      bestAdjustedScore = candidate.adjustedScore;
+      bestScore = candidate.score;
+      bestOffset = candidate.offset;
+      bestOverlap = candidate.overlap;
+    }
+  };
+
+  for (let offset = 1; offset <= maxOffset; offset += coarseStep) {
+    consider(scoreOffset(offset));
+  }
+
+  const fineStart = Math.max(1, bestOffset - coarseStep);
+  const fineEnd = Math.min(maxOffset, bestOffset + coarseStep);
+  for (let offset = fineStart; offset <= fineEnd; offset += 1) {
+    consider(scoreOffset(offset));
+  }
+
+  const matched = bestScore <= LONG_CAPTURE_MATCH_THRESHOLD;
+
+  return {
+    offset: bestOffset,
+    minShift,
+    overlap: bestOverlap,
+    score: bestScore,
+    matched,
+    tooSmall: matched && bestOffset < minShift,
+  };
+}
+
 function normalizeBounds(start: Point, end: Point): Bounds {
   return {
     left: Math.min(start.x, end.x),
     top: Math.min(start.y, end.y),
     width: Math.abs(end.x - start.x),
     height: Math.abs(end.y - start.y),
+  };
+}
+
+function roundBounds(bounds: Bounds): Bounds {
+  return {
+    left: Math.round(bounds.left),
+    top: Math.round(bounds.top),
+    width: Math.max(1, Math.round(bounds.width)),
+    height: Math.max(1, Math.round(bounds.height)),
   };
 }
 
@@ -201,6 +488,42 @@ function pointInBounds(point: Point, bounds: Bounds) {
     point.y >= bounds.top &&
     point.y <= bounds.top + bounds.height
   );
+}
+
+function getLongCapturePanelBounds(bounds: Bounds): Bounds {
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  let left = bounds.left + bounds.width + LONG_CAPTURE_PANEL_GAP;
+  if (
+    left + LONG_CAPTURE_PANEL_WIDTH + LONG_CAPTURE_PANEL_MARGIN >
+    viewportWidth
+  ) {
+    left = bounds.left - LONG_CAPTURE_PANEL_WIDTH - LONG_CAPTURE_PANEL_GAP;
+  }
+  if (left < LONG_CAPTURE_PANEL_MARGIN) {
+    left = Math.max(
+      LONG_CAPTURE_PANEL_MARGIN,
+      Math.min(
+        viewportWidth - LONG_CAPTURE_PANEL_WIDTH - LONG_CAPTURE_PANEL_MARGIN,
+        bounds.left + bounds.width - LONG_CAPTURE_PANEL_WIDTH
+      )
+    );
+  }
+
+  const top = Math.max(
+    LONG_CAPTURE_PANEL_MARGIN,
+    Math.min(
+      viewportHeight - LONG_CAPTURE_PANEL_HEIGHT - LONG_CAPTURE_PANEL_MARGIN,
+      bounds.top + (bounds.height - LONG_CAPTURE_PANEL_HEIGHT) / 2
+    )
+  );
+
+  return {
+    left,
+    top,
+    width: LONG_CAPTURE_PANEL_WIDTH,
+    height: LONG_CAPTURE_PANEL_HEIGHT,
+  };
 }
 
 function getHandleCursor(handle: ResizeHandle) {
@@ -270,14 +593,29 @@ function getResizeHandleAtPoint(
   return null;
 }
 
-function clampMoveBounds(bounds: Bounds, canvas: fabric.Canvas): Bounds {
-  const maxLeft = Math.max(0, canvas.getWidth() - bounds.width);
-  const maxTop = Math.max(0, canvas.getHeight() - bounds.height);
+function clampMoveBounds(
+  bounds: Bounds,
+  canvas: fabric.Canvas,
+  limitBounds: Bounds = {
+    left: 0,
+    top: 0,
+    width: canvas.getWidth(),
+    height: canvas.getHeight(),
+  }
+): Bounds {
+  const maxLeft = Math.max(
+    limitBounds.left,
+    limitBounds.left + limitBounds.width - bounds.width
+  );
+  const maxTop = Math.max(
+    limitBounds.top,
+    limitBounds.top + limitBounds.height - bounds.height
+  );
 
   return {
     ...bounds,
-    left: Math.min(Math.max(0, bounds.left), maxLeft),
-    top: Math.min(Math.max(0, bounds.top), maxTop),
+    left: Math.min(Math.max(limitBounds.left, bounds.left), maxLeft),
+    top: Math.min(Math.max(limitBounds.top, bounds.top), maxTop),
   };
 }
 
@@ -293,7 +631,13 @@ function computeResizeBounds(
   initial: Bounds,
   start: Point,
   current: Point,
-  canvas: fabric.Canvas
+  canvas: fabric.Canvas,
+  limitBounds: Bounds = {
+    left: 0,
+    top: 0,
+    width: canvas.getWidth(),
+    height: canvas.getHeight(),
+  }
 ): Bounds {
   const deltaX = current.x - start.x;
   const deltaY = current.y - start.y;
@@ -307,10 +651,15 @@ function computeResizeBounds(
   if (handle.includes("n")) top += deltaY;
   if (handle.includes("s")) bottom += deltaY;
 
-  left = Math.min(Math.max(0, left), canvas.getWidth());
-  right = Math.min(Math.max(0, right), canvas.getWidth());
-  top = Math.min(Math.max(0, top), canvas.getHeight());
-  bottom = Math.min(Math.max(0, bottom), canvas.getHeight());
+  const minLeft = limitBounds.left;
+  const minTop = limitBounds.top;
+  const maxRight = limitBounds.left + limitBounds.width;
+  const maxBottom = limitBounds.top + limitBounds.height;
+
+  left = Math.min(Math.max(minLeft, left), maxRight);
+  right = Math.min(Math.max(minLeft, right), maxRight);
+  top = Math.min(Math.max(minTop, top), maxBottom);
+  bottom = Math.min(Math.max(minTop, bottom), maxBottom);
 
   if (right - left < MIN_SELECTION_SIZE) {
     if (handle.includes("w")) left = right - MIN_SELECTION_SIZE;
@@ -322,10 +671,10 @@ function computeResizeBounds(
     else bottom = top + MIN_SELECTION_SIZE;
   }
 
-  if (left < 0) left = 0;
-  if (top < 0) top = 0;
-  if (right > canvas.getWidth()) right = canvas.getWidth();
-  if (bottom > canvas.getHeight()) bottom = canvas.getHeight();
+  if (left < minLeft) left = minLeft;
+  if (top < minTop) top = minTop;
+  if (right > maxRight) right = maxRight;
+  if (bottom > maxBottom) bottom = maxBottom;
 
   return {
     left,
@@ -378,6 +727,8 @@ function isAnnotation(object: fabric.Object) {
 export default function ScreenshotWindow() {
   const { t } = useTranslation();
   const canvasElementRef = useRef<HTMLCanvasElement>(null);
+  const longCapturePreviewCanvasRef = useRef<HTMLCanvasElement>(null);
+  const longCapturePanelRef = useRef<HTMLDivElement | null>(null);
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   const fabricCanvasRef = useRef<fabric.Canvas | null>(null);
   const sourceImageRef = useRef<HTMLImageElement | null>(null);
@@ -385,8 +736,23 @@ export default function ScreenshotWindow() {
   const bgImgRef = useRef<fabric.FabricImage | null>(null);
   const selectionImgRef = useRef<fabric.FabricImage | null>(null);
   const maskRef = useRef<fabric.Rect | null>(null);
+  const longCaptureFrameRef = useRef<fabric.Rect | null>(null);
   const selectionBoundsRef = useRef<Bounds | null>(null);
   const scaleRef = useRef(1);
+  const longCaptureBoundsRef = useRef<Bounds | null>(null);
+  const longCaptureResultCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const longCaptureLastFrameRef = useRef<HTMLCanvasElement | null>(null);
+  const longCaptureResultBlobRef = useRef<Blob | null>(null);
+  const longCaptureResultUrlRef = useRef<string | null>(null);
+  const longCaptureBusyRef = useRef(false);
+  const longCaptureActiveRef = useRef(false);
+  const longCaptureShortcutsRegisteredRef = useRef(false);
+  const longCaptureScrollTimerRef = useRef<number | null>(null);
+  const longCaptureSnapshotHiddenRef = useRef(false);
+  const longCapturePendingAppendRef = useRef(false);
+  const longCaptureWindowOriginRef = useRef<Point>({ x: 0, y: 0 });
+  const longCaptureRectCaptureFailedRef = useRef(false);
+  const longCaptureLastScrollCaptureAtRef = useRef(0);
   const dragStartRef = useRef<Point | null>(null);
   const selectionDragRef = useRef<SelectionDragState | null>(null);
   const windowRegionsRef = useRef<CaptureWindowRegion[]>([]);
@@ -416,6 +782,12 @@ export default function ScreenshotWindow() {
   const [historyRevision, setHistoryRevision] = useState(0);
   const [selectedAnnotationRevision, setSelectedAnnotationRevision] =
     useState(0);
+  const [longCapture, setLongCapture] = useState<LongCaptureState>({
+    status: "idle",
+    frameCount: 0,
+    height: 0,
+    messageKey: null,
+  });
   const [toolbarPosition, setToolbarPosition] = useState<{
     left: number;
     top: number;
@@ -423,6 +795,11 @@ export default function ScreenshotWindow() {
 
   const canUndo = historyRevision >= 0 && undoStackRef.current.length > 0;
   const canRedo = historyRevision >= 0 && redoStackRef.current.length > 0;
+  const isLongCaptureActive =
+    longCapture.status === "waiting" ||
+    longCapture.status === "capturing" ||
+    longCapture.status === "failed";
+  const isLongCaptureResultReady = longCapture.status === "ready";
 
   useEffect(() => {
     activeToolRef.current = activeTool;
@@ -475,6 +852,15 @@ export default function ScreenshotWindow() {
   useEffect(() => {
     textSizeRef.current = textSize;
   }, [textSize]);
+
+  useEffect(() => {
+    longCaptureActiveRef.current = isLongCaptureActive;
+  }, [isLongCaptureActive]);
+
+  useEffect(() => {
+    if (!isLongCaptureActive || !longCaptureResultCanvasRef.current) return;
+    updateLongCaptureThumbnail(longCaptureResultCanvasRef.current);
+  }, [isLongCaptureActive, longCapture.frameCount]);
 
   const bumpHistory = () => setHistoryRevision((value) => value + 1);
 
@@ -603,6 +989,36 @@ export default function ScreenshotWindow() {
     object.setCoords();
   };
 
+  const getSourceDisplayBounds = (): Bounds | null => {
+    const image = bgImgRef.current;
+    const canvas = fabricCanvasRef.current;
+    if (!image) {
+      return canvas
+        ? {
+            left: 0,
+            top: 0,
+            width: canvas.getWidth(),
+            height: canvas.getHeight(),
+          }
+        : null;
+    }
+
+    return {
+      left: image.left ?? 0,
+      top: image.top ?? 0,
+      width: image.getScaledWidth(),
+      height: image.getScaledHeight(),
+    };
+  };
+
+  const getSelectionLimitBounds = (canvas: fabric.Canvas) =>
+    getSourceDisplayBounds() ?? {
+      left: 0,
+      top: 0,
+      width: canvas.getWidth(),
+      height: canvas.getHeight(),
+    };
+
   const calculateToolbarPosition = (bounds: Bounds) => {
     const toolbarWidth =
       toolbarRef.current?.offsetWidth || DEFAULT_TOOLBAR_WIDTH;
@@ -622,9 +1038,9 @@ export default function ScreenshotWindow() {
     }
 
     top = Math.min(
-      Math.max(TOOLBAR_MARGIN, top),
+      Math.max(TOOLBAR_SAFE_TOP, top),
       Math.max(
-        TOOLBAR_MARGIN,
+        TOOLBAR_SAFE_TOP,
         window.innerHeight - toolbarHeight - TOOLBAR_MARGIN
       )
     );
@@ -739,6 +1155,7 @@ export default function ScreenshotWindow() {
           top: window.y * scaleY,
           width: window.width * scaleX,
           height: window.height * scaleY,
+          pid: window.pid,
           title: window.title,
           appName: window.app_name,
           isFullscreenLike: window.is_fullscreen_like,
@@ -759,6 +1176,19 @@ export default function ScreenshotWindow() {
       windowRegionsRef.current,
       fabricCanvasRef.current
     );
+
+  const updateLongCaptureWindowOrigin = async () => {
+    const win = getCurrentWindow();
+    const [position, scaleFactor] = await Promise.all([
+      win.innerPosition(),
+      win.scaleFactor(),
+    ]);
+    const logicalPosition = position.toLogical(scaleFactor);
+    longCaptureWindowOriginRef.current = {
+      x: logicalPosition.x,
+      y: logicalPosition.y,
+    };
+  };
 
   const getBestWindowMatch = (
     point: Point,
@@ -855,18 +1285,38 @@ export default function ScreenshotWindow() {
   const resetEditor = () => {
     const canvas = fabricCanvasRef.current;
     canvas?.clear();
+    clearLongCaptureScrollTimer();
+    longCaptureSnapshotHiddenRef.current = false;
+    document.body.classList.remove("long-capture-snapshot-mode");
+    document.body.classList.remove("long-capture-panel-snapshot-mode");
     if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
+    if (longCaptureResultUrlRef.current) {
+      URL.revokeObjectURL(longCaptureResultUrlRef.current);
+    }
 
     sourceUrlRef.current = null;
     sourceImageRef.current = null;
     bgImgRef.current = null;
     selectionImgRef.current = null;
     maskRef.current = null;
+    longCaptureFrameRef.current = null;
     selectionBoundsRef.current = null;
     dragStartRef.current = null;
     selectionDragRef.current = null;
     windowRegionsRef.current = [];
     hoverWindowRef.current = null;
+    longCaptureBoundsRef.current = null;
+    longCaptureResultCanvasRef.current = null;
+    longCaptureLastFrameRef.current = null;
+    longCaptureResultBlobRef.current = null;
+    longCaptureResultUrlRef.current = null;
+    longCaptureBusyRef.current = false;
+    longCaptureActiveRef.current = false;
+    longCaptureShortcutsRegisteredRef.current = false;
+    longCapturePendingAppendRef.current = false;
+    longCaptureWindowOriginRef.current = { x: 0, y: 0 };
+    longCaptureRectCaptureFailedRef.current = false;
+    longCaptureLastScrollCaptureAtRef.current = 0;
     draftObjectRef.current = null;
     selectedAnnotationRef.current = null;
     selectionHandleRefs.current = {};
@@ -877,6 +1327,17 @@ export default function ScreenshotWindow() {
     setToolbarPosition(null);
     setSelectionReady(false);
     setActiveTool("select");
+    setLongCapture({
+      status: "idle",
+      frameCount: 0,
+      height: 0,
+      messageKey: null,
+    });
+    const previewCanvas = longCapturePreviewCanvasRef.current;
+    const previewContext = previewCanvas?.getContext("2d");
+    if (previewCanvas && previewContext) {
+      previewContext.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+    }
     setSelectedAnnotationRevision((value) => value + 1);
     bumpHistory();
   };
@@ -1126,16 +1587,22 @@ export default function ScreenshotWindow() {
   ) => {
     const canvas = fabricCanvasRef.current;
     const selectionImg = selectionImgRef.current;
-    if (!canvas || !selectionImg || !bgImgRef.current) return;
+    const sourceBounds = getSourceDisplayBounds();
+    const sourceImage = sourceImageRef.current;
+    if (!canvas || !selectionImg || !sourceBounds || !sourceImage) return;
 
-    const scale = scaleRef.current;
+    const scale =
+      sourceBounds.width /
+      Math.max(1, sourceImage.naturalWidth || sourceImage.width);
+    const cropX = (bounds.left - sourceBounds.left) / scale;
+    const cropY = (bounds.top - sourceBounds.top) / scale;
     selectionImg.set({
       left: bounds.left,
       top: bounds.top,
       width: bounds.width / scale,
       height: bounds.height / scale,
-      cropX: bounds.left / scale,
-      cropY: bounds.top / scale,
+      cropX,
+      cropY,
       visible: true,
     });
 
@@ -1170,7 +1637,9 @@ export default function ScreenshotWindow() {
     }
 
     const canvas = fabricCanvasRef.current;
-    const nextBounds = canvas ? clampMoveBounds(bounds, canvas) : bounds;
+    const nextBounds = canvas
+      ? clampMoveBounds(bounds, canvas, getSelectionLimitBounds(canvas))
+      : bounds;
     selectionBoundsRef.current = nextBounds;
     updateSelection(nextBounds, {
       commit: true,
@@ -1305,7 +1774,61 @@ export default function ScreenshotWindow() {
     });
   };
 
+  const exportLongCaptureSelectionBlob = async () => {
+    const result = longCaptureResultCanvasRef.current;
+    const bounds = selectionBoundsRef.current;
+    const sourceBounds = getSourceDisplayBounds();
+    if (!result || !bounds || !sourceBounds)
+      return longCaptureResultBlobRef.current;
+
+    const scale = sourceBounds.width / Math.max(1, result.width);
+    const sourceX = Math.max(
+      0,
+      Math.min(
+        result.width - 1,
+        Math.round((bounds.left - sourceBounds.left) / scale)
+      )
+    );
+    const sourceY = Math.max(
+      0,
+      Math.min(
+        result.height - 1,
+        Math.round((bounds.top - sourceBounds.top) / scale)
+      )
+    );
+    const sourceWidth = Math.max(
+      1,
+      Math.min(result.width - sourceX, Math.round(bounds.width / scale))
+    );
+    const sourceHeight = Math.max(
+      1,
+      Math.min(result.height - sourceY, Math.round(bounds.height / scale))
+    );
+
+    const output = makeCanvas(sourceWidth, sourceHeight);
+    const context = output.getContext("2d");
+    if (!context) return longCaptureResultBlobRef.current;
+
+    context.drawImage(
+      result,
+      sourceX,
+      sourceY,
+      sourceWidth,
+      sourceHeight,
+      0,
+      0,
+      sourceWidth,
+      sourceHeight
+    );
+
+    return canvasToBlob(output);
+  };
+
   const exportSelectionBlob = async () => {
+    if (longCaptureResultBlobRef.current) {
+      return exportLongCaptureSelectionBlob();
+    }
+
     const canvas = fabricCanvasRef.current;
     const selectionImg = selectionImgRef.current;
     const bounds = selectionBoundsRef.current;
@@ -1334,10 +1857,622 @@ export default function ScreenshotWindow() {
     }
   };
 
+  const unregisterLongCaptureShortcuts = async () => {
+    if (!longCaptureShortcutsRegisteredRef.current) return;
+
+    try {
+      await unregister(LONG_CAPTURE_SHORTCUTS);
+    } catch (error) {
+      console.warn("Failed to unregister long capture shortcuts:", error);
+    } finally {
+      longCaptureShortcutsRegisteredRef.current = false;
+    }
+  };
+
+  const clearLongCaptureScrollTimer = () => {
+    if (longCaptureScrollTimerRef.current === null) return;
+    window.clearTimeout(longCaptureScrollTimerRef.current);
+    longCaptureScrollTimerRef.current = null;
+  };
+
+  const setLongCaptureSnapshotHidden = async (
+    hidden: boolean,
+    hidePanel = false
+  ) => {
+    const panelHidden = hidden && hidePanel;
+    const wasHidden = longCaptureSnapshotHiddenRef.current;
+    const wasPanelHidden = document.body.classList.contains(
+      "long-capture-panel-snapshot-mode"
+    );
+    if (wasHidden === hidden && wasPanelHidden === panelHidden) return;
+
+    longCaptureSnapshotHiddenRef.current = hidden;
+    document.body.classList.toggle("long-capture-snapshot-mode", hidden);
+    document.body.classList.toggle(
+      "long-capture-panel-snapshot-mode",
+      panelHidden
+    );
+    await waitForNextPaint();
+  };
+
+  const stopLongCaptureNativeMode = async () => {
+    await invoke("stop_long_capture_scroll_monitor").catch((error) => {
+      console.warn("Failed to stop long capture scroll monitor:", error);
+    });
+    await invoke("set_screenshot_mouse_passthrough", {
+      enabled: false,
+    }).catch((error) => {
+      console.warn("Failed to restore screenshot mouse passthrough:", error);
+    });
+    await getCurrentWindow()
+      .setIgnoreCursorEvents(false)
+      .catch(() => {});
+  };
+
   const closeCapture = async () => {
+    clearLongCaptureScrollTimer();
+    await setLongCaptureSnapshotHidden(false);
+    await unregisterLongCaptureShortcuts();
+    await stopLongCaptureNativeMode();
     await invoke("finish_capture");
     resetEditor();
   };
+
+  const captureLongSelectionFrame = async (bounds: Bounds) => {
+    const origin = longCaptureWindowOriginRef.current;
+    const rect = {
+      x: origin.x + bounds.left,
+      y: origin.y + bounds.top,
+      width: bounds.width,
+      height: bounds.height,
+    };
+
+    try {
+      const imageBytes = await invoke<ArrayBuffer>(
+        "capture_screen_rect_below_screenshot_window",
+        {
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+        }
+      );
+      const blob = new Blob([imageBytes], { type: "image/png" });
+      const captured = await imageFromBlob(blob);
+      logLongCaptureDebug("below-window rect captured", {
+        rect,
+        pixels: {
+          width: captured.image.naturalWidth || captured.image.width,
+          height: captured.image.naturalHeight || captured.image.height,
+        },
+      });
+      return {
+        frame: imageToCanvas(captured.image),
+        cleanup: () => URL.revokeObjectURL(captured.url),
+      };
+    } catch (error) {
+      if (longCaptureActiveRef.current) {
+        if (!longCaptureRectCaptureFailedRef.current) {
+          console.warn("Below-window rectangle capture failed:", error);
+        }
+        longCaptureRectCaptureFailedRef.current = true;
+        throw error;
+      }
+
+      try {
+        const imageBytes = await invoke<ArrayBuffer>("capture_screen_rect", {
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+        });
+        const blob = new Blob([imageBytes], { type: "image/png" });
+        const captured = await imageFromBlob(blob);
+        logLongCaptureDebug("rect captured", {
+          rect,
+          pixels: {
+            width: captured.image.naturalWidth || captured.image.width,
+            height: captured.image.naturalHeight || captured.image.height,
+          },
+        });
+        return {
+          frame: imageToCanvas(captured.image),
+          cleanup: () => URL.revokeObjectURL(captured.url),
+        };
+      } catch (fallbackError) {
+        if (!longCaptureRectCaptureFailedRef.current) {
+          console.warn("Rectangle capture failed:", fallbackError);
+        }
+        longCaptureRectCaptureFailedRef.current = true;
+        throw fallbackError;
+      }
+    }
+  };
+
+  const updateLongCaptureThumbnail = (canvas: HTMLCanvasElement) => {
+    const previewCanvas = longCapturePreviewCanvasRef.current;
+    const context = previewCanvas?.getContext("2d");
+    if (!previewCanvas || !context) return;
+
+    context.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+
+    const scale = Math.min(
+      previewCanvas.width / canvas.width,
+      previewCanvas.height / canvas.height
+    );
+    const width = Math.max(1, Math.round(canvas.width * scale));
+    const height = Math.max(1, Math.round(canvas.height * scale));
+    const left = Math.round((previewCanvas.width - width) / 2);
+    const top = Math.round((previewCanvas.height - height) / 2);
+
+    context.drawImage(canvas, left, top, width, height);
+  };
+
+  const enterLongCaptureLiveOverlay = (bounds: Bounds) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    bgImgRef.current?.set("visible", false);
+    maskRef.current?.set("visible", false);
+    selectionImgRef.current?.set("visible", false);
+    setSelectionHandlesVisible(false);
+
+    if (longCaptureFrameRef.current) {
+      canvas.remove(longCaptureFrameRef.current);
+    }
+
+    const frame = new fabric.Rect({
+      left: bounds.left,
+      top: bounds.top,
+      width: bounds.width,
+      height: bounds.height,
+      fill: "rgba(0, 0, 0, 0)",
+      stroke: "#1677ff",
+      strokeWidth: 2,
+      strokeDashArray: [8, 5],
+      selectable: false,
+      evented: false,
+    });
+    longCaptureFrameRef.current = frame;
+    canvas.add(frame);
+    canvas.bringObjectToFront(frame);
+    canvas.requestRenderAll();
+  };
+
+  const appendLongCaptureFrame = (frame: HTMLCanvasElement) => {
+    const result = longCaptureResultCanvasRef.current;
+    const previousFrame = longCaptureLastFrameRef.current;
+    if (!result || !previousFrame) return false;
+
+    if (frame.width !== result.width) {
+      setLongCapture((current) => ({
+        ...current,
+        status: "failed",
+        messageKey: "screenshot.longCapture.widthChanged",
+      }));
+      return false;
+    }
+
+    const match = findVerticalScrollOffset(previousFrame, frame);
+    if (!match.matched) {
+      logLongCaptureDebug("scroll offset match failed", {
+        offset: match.offset,
+        overlap: match.overlap,
+        score: match.score,
+      });
+      setLongCapture((current) => ({
+        ...current,
+        status: "waiting",
+        messageKey: "screenshot.longCapture.matchFailed",
+      }));
+      return false;
+    }
+
+    if (match.tooSmall) {
+      logLongCaptureDebug("scroll offset below minimum", {
+        offset: match.offset,
+        minShift: match.minShift,
+        overlap: match.overlap,
+        score: match.score,
+      });
+      setLongCapture((current) => ({
+        ...current,
+        status: "waiting",
+        messageKey: "screenshot.longCapture.noNewContent",
+      }));
+      return true;
+    }
+
+    const appendHeight = Math.max(1, match.offset - 1);
+    const appendTop = Math.max(0, frame.height - appendHeight);
+    longCaptureLastFrameRef.current = frame;
+    logLongCaptureDebug("scroll offset matched", {
+      offset: match.offset,
+      minShift: match.minShift,
+      overlap: match.overlap,
+      score: match.score,
+      appendHeight,
+      resultHeight: result.height,
+    });
+
+    if (appendHeight <= 2) {
+      setLongCapture((current) => ({
+        ...current,
+        status: "waiting",
+        messageKey: "screenshot.longCapture.noNewContent",
+      }));
+      return true;
+    }
+
+    if (result.height + appendHeight > LONG_CAPTURE_MAX_HEIGHT) {
+      setLongCapture((current) => ({
+        ...current,
+        status: "failed",
+        messageKey: "screenshot.longCapture.tooTall",
+      }));
+      return false;
+    }
+
+    const nextResult = makeCanvas(result.width, result.height + appendHeight);
+    const context = nextResult.getContext("2d");
+    if (!context) return false;
+
+    context.drawImage(result, 0, 0);
+    context.drawImage(
+      frame,
+      0,
+      appendTop,
+      frame.width,
+      appendHeight,
+      0,
+      result.height,
+      frame.width,
+      appendHeight
+    );
+
+    longCaptureResultCanvasRef.current = nextResult;
+    updateLongCaptureThumbnail(nextResult);
+    setLongCapture((current) => ({
+      ...current,
+      status: "waiting",
+      frameCount: current.frameCount + 1,
+      height: nextResult.height,
+      messageKey: "screenshot.longCapture.appended",
+    }));
+    return true;
+  };
+
+  const updateLongCapturePreview = async (blob: Blob) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    const previousUrl = longCaptureResultUrlRef.current;
+    if (previousUrl) URL.revokeObjectURL(previousUrl);
+
+    const { image, url } = await imageFromBlob(blob);
+    longCaptureResultUrlRef.current = url;
+    if (sourceUrlRef.current && sourceUrlRef.current !== url) {
+      URL.revokeObjectURL(sourceUrlRef.current);
+    }
+    sourceImageRef.current = image;
+    sourceUrlRef.current = url;
+
+    canvas.clear();
+    bgImgRef.current = null;
+    maskRef.current = null;
+    longCaptureFrameRef.current = null;
+    selectionHandleRefs.current = {};
+    windowRegionsRef.current = [];
+    hoverWindowRef.current = null;
+    selectAnnotation(null);
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    bumpHistory();
+
+    const maxWidth = Math.max(1, canvas.getWidth() - 40);
+    const maxHeight = Math.max(1, canvas.getHeight() - 96);
+    const previewScale = Math.min(
+      1,
+      maxWidth / image.width,
+      maxHeight / image.height
+    );
+    scaleRef.current = previewScale;
+
+    const previewWidth = image.width * previewScale;
+    const previewHeight = image.height * previewScale;
+    const bounds = {
+      left: (canvas.getWidth() - previewWidth) / 2,
+      top: Math.max(16, (canvas.getHeight() - previewHeight) / 2 - 18),
+      width: previewWidth,
+      height: previewHeight,
+    };
+
+    const background = await fabric.FabricImage.fromURL(url);
+    background.set({
+      left: bounds.left,
+      top: bounds.top,
+      scaleX: previewScale,
+      scaleY: previewScale,
+      selectable: false,
+      evented: false,
+    });
+    bgImgRef.current = background;
+    canvas.add(background);
+
+    const mask = new fabric.Rect({
+      left: 0,
+      top: 0,
+      width: canvas.getWidth(),
+      height: canvas.getHeight(),
+      fill: "rgba(0, 0, 0, 0.52)",
+      selectable: false,
+      evented: false,
+    });
+    maskRef.current = mask;
+    canvas.add(mask);
+
+    const preview = await fabric.FabricImage.fromURL(url);
+    preview.set({
+      left: bounds.left,
+      top: bounds.top,
+      scaleX: previewScale,
+      scaleY: previewScale,
+      selectable: false,
+      evented: false,
+      stroke: "#1677ff",
+      strokeWidth: 2 / previewScale,
+    });
+
+    selectionImgRef.current = preview;
+    selectionBoundsRef.current = bounds;
+    canvas.add(preview);
+    syncSelectionHandles(bounds);
+    syncToolbarPosition(bounds);
+    setSelectionReady(true);
+    setActiveTool("select");
+    canvas.requestRenderAll();
+  };
+
+  const finishLongCapture = async () => {
+    const result = longCaptureResultCanvasRef.current;
+    if (!result || longCaptureBusyRef.current) return;
+
+    clearLongCaptureScrollTimer();
+    longCaptureBusyRef.current = true;
+    await unregisterLongCaptureShortcuts();
+    await setLongCaptureSnapshotHidden(false);
+    await stopLongCaptureNativeMode();
+    setLongCapture((current) => ({
+      ...current,
+      status: "capturing",
+      messageKey: "screenshot.longCapture.rendering",
+    }));
+
+    try {
+      const blob = await canvasToBlob(result);
+      if (!blob) throw new Error("Failed to render long capture");
+
+      longCaptureResultBlobRef.current = blob;
+      await invoke("ensure_screenshot_window");
+      await wait(120);
+      await updateLongCapturePreview(blob);
+      const win = getCurrentWindow();
+      await win.show().catch(() => {});
+      await win.setFocus().catch(() => {});
+      setLongCapture((current) => ({
+        ...current,
+        status: "ready",
+        frameCount: current.frameCount,
+        height: result.height,
+        messageKey: "screenshot.longCapture.ready",
+      }));
+    } catch (error) {
+      console.error("Failed to finish long capture:", error);
+      setLongCapture((current) => ({
+        ...current,
+        status: "failed",
+        messageKey: "screenshot.longCapture.renderFailed",
+      }));
+    } finally {
+      longCaptureBusyRef.current = false;
+    }
+  };
+
+  const captureNextLongFrame = async () => {
+    const bounds = longCaptureBoundsRef.current;
+    if (!bounds) return;
+    if (longCaptureBusyRef.current) {
+      longCapturePendingAppendRef.current = true;
+      return;
+    }
+
+    longCaptureBusyRef.current = true;
+    setLongCapture((current) => ({
+      ...current,
+      status: "capturing",
+      messageKey: "screenshot.longCapture.capturing",
+    }));
+
+    let cleanupCapturedFrame: (() => void) | null = null;
+    try {
+      const captured = await captureLongSelectionFrame(bounds);
+      cleanupCapturedFrame = captured.cleanup;
+      const frame = captured.frame;
+      appendLongCaptureFrame(frame);
+    } catch (error) {
+      console.error("Failed to append long capture frame:", error);
+      setLongCapture((current) => ({
+        ...current,
+        status: "failed",
+        messageKey: "screenshot.longCapture.captureFailed",
+      }));
+    } finally {
+      cleanupCapturedFrame?.();
+      longCaptureBusyRef.current = false;
+      if (longCapturePendingAppendRef.current && longCaptureActiveRef.current) {
+        longCapturePendingAppendRef.current = false;
+        void captureNextLongFrame();
+      }
+    }
+  };
+
+  const scheduleLongCaptureAutoAppend = (
+    delay = LONG_CAPTURE_SCROLL_SETTLE_DELAY
+  ) => {
+    clearLongCaptureScrollTimer();
+    longCaptureScrollTimerRef.current = window.setTimeout(() => {
+      longCaptureScrollTimerRef.current = null;
+      if (!longCaptureActiveRef.current) return;
+      if (longCaptureBusyRef.current) {
+        longCapturePendingAppendRef.current = true;
+        return;
+      }
+      void captureNextLongFrame();
+    }, delay);
+  };
+
+  const handleLongCaptureNativeScroll = (event: LongCaptureScrollEvent) => {
+    if (!longCaptureActiveRef.current) return;
+    if (event.deltaX === 0 && event.deltaY === 0) return;
+
+    setLongCapture((current) =>
+      current.messageKey === "screenshot.longCapture.scrolling"
+        ? current
+        : {
+            ...current,
+            status: "waiting",
+            messageKey: "screenshot.longCapture.scrolling",
+          }
+    );
+    scheduleLongCaptureAutoAppend();
+
+    const now = performance.now();
+    if (
+      now - longCaptureLastScrollCaptureAtRef.current <
+      LONG_CAPTURE_MANUAL_CAPTURE_INTERVAL
+    ) {
+      return;
+    }
+
+    longCaptureLastScrollCaptureAtRef.current = now;
+    void captureNextLongFrame();
+  };
+
+  const registerLongCaptureShortcuts = async () => {
+    if (longCaptureShortcutsRegisteredRef.current) return;
+
+    await register(LONG_CAPTURE_SHORTCUTS, async (event) => {
+      if (event.state !== "Pressed") return;
+
+      if (event.shortcut === "Enter") {
+        await finishLongCapture();
+      } else if (event.shortcut === "Escape") {
+        await closeCapture();
+      }
+    });
+    longCaptureShortcutsRegisteredRef.current = true;
+  };
+
+  const startLongCapture = async () => {
+    const selection = selectionBoundsRef.current;
+    const sourceImage = sourceImageRef.current;
+    if (!selection || !sourceImage || longCaptureBusyRef.current) return;
+
+    const captureSelection = roundBounds(selection);
+    const firstFrame = cropSelectionFrame(
+      sourceImage,
+      captureSelection,
+      scaleRef.current
+    );
+    if (!firstFrame) return;
+
+    selectAnnotation(null);
+    setActiveTool("select");
+    setSelectionHandlesVisible(false);
+    clearLongCaptureScrollTimer();
+    await updateLongCaptureWindowOrigin().catch((error) => {
+      console.warn("Failed to resolve screenshot window position:", error);
+      longCaptureWindowOriginRef.current = { x: 0, y: 0 };
+    });
+    const permissionStatus = await invoke<MacosPermissionStatus>(
+      "get_macos_permissions"
+    ).catch(() => null);
+    longCaptureResultBlobRef.current = null;
+    if (longCaptureResultUrlRef.current) {
+      URL.revokeObjectURL(longCaptureResultUrlRef.current);
+      longCaptureResultUrlRef.current = null;
+    }
+    longCaptureBoundsRef.current = { ...captureSelection };
+    longCapturePendingAppendRef.current = false;
+    longCaptureRectCaptureFailedRef.current = false;
+    longCaptureLastScrollCaptureAtRef.current = 0;
+    longCaptureResultCanvasRef.current = cloneCanvas(firstFrame);
+    longCaptureLastFrameRef.current = firstFrame;
+    enterLongCaptureLiveOverlay(captureSelection);
+    updateLongCaptureThumbnail(longCaptureResultCanvasRef.current);
+    logLongCaptureDebug("started", {
+      bounds: captureSelection,
+      origin: longCaptureWindowOriginRef.current,
+      permissions: permissionStatus,
+      firstFrame: {
+        width: firstFrame.width,
+        height: firstFrame.height,
+      },
+    });
+    setLongCapture({
+      status: "waiting",
+      frameCount: 1,
+      height: firstFrame.height,
+      messageKey: "screenshot.longCapture.started",
+    });
+
+    try {
+      await registerLongCaptureShortcuts();
+    } catch (error) {
+      console.warn("Failed to register long capture shortcuts:", error);
+      setLongCapture((current) => ({
+        ...current,
+        messageKey: "screenshot.longCapture.shortcutUnavailable",
+      }));
+    }
+
+    try {
+      await invoke("set_screenshot_mouse_passthrough", {
+        enabled: true,
+      });
+      await invoke("start_long_capture_scroll_monitor");
+    } catch (error) {
+      console.warn("Failed to enter native long capture mode:", error);
+      await stopLongCaptureNativeMode();
+      setLongCapture((current) => ({
+        ...current,
+        status: "failed",
+        messageKey: permissionStatus?.macos
+          ? "screenshot.longCapture.accessibilityRequired"
+          : "screenshot.longCapture.captureFailed",
+      }));
+      return;
+    }
+
+    await getCurrentWindow()
+      .setFocus()
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    const unlisten = listen<LongCaptureScrollEvent>(
+      "long-capture-scroll",
+      (event) => {
+        handleLongCaptureNativeScroll(event.payload);
+      }
+    );
+
+    return () => {
+      unlisten.then((dispose) => dispose());
+    };
+  }, []);
 
   const copyToClipboard = async () => {
     const blob = await exportSelectionBlob();
@@ -1450,6 +2585,7 @@ export default function ScreenshotWindow() {
     if (!canvas) return;
 
     const handleMouseDown = (opt: fabric.TPointerEventInfo) => {
+      if (longCaptureActiveRef.current) return;
       if (activeToolRef.current === "pen") return;
 
       const pointer = canvas.getPointer(opt.e);
@@ -1545,6 +2681,7 @@ export default function ScreenshotWindow() {
     };
 
     const handleMouseMove = (opt: fabric.TPointerEventInfo) => {
+      if (longCaptureActiveRef.current) return;
       if (activeToolRef.current === "pen") return;
 
       const pointer = canvas.getPointer(opt.e);
@@ -1614,7 +2751,8 @@ export default function ScreenshotWindow() {
               left: dragState.initial.left + point.x - dragState.start.x,
               top: dragState.initial.top + point.y - dragState.start.y,
             },
-            canvas
+            canvas,
+            getSelectionLimitBounds(canvas)
           );
           updateSelection(nextBounds, {
             commit: true,
@@ -1629,7 +2767,8 @@ export default function ScreenshotWindow() {
           dragState.initial,
           dragState.start,
           point,
-          canvas
+          canvas,
+          getSelectionLimitBounds(canvas)
         );
         updateSelection(nextBounds, {
           commit: true,
@@ -1649,6 +2788,7 @@ export default function ScreenshotWindow() {
     };
 
     const handleMouseUp = (opt: fabric.TPointerEventInfo) => {
+      if (longCaptureActiveRef.current) return;
       if (!isDraggingRef.current || activeToolRef.current === "pen") return;
 
       const pointer = canvas.getPointer(opt.e);
@@ -1708,7 +2848,10 @@ export default function ScreenshotWindow() {
     const unlisten = listen("start-capture", async () => {
       const startedAt = performance.now();
       try {
-        await getCurrentWindow().hide();
+        const currentWindow = getCurrentWindow();
+        await unregisterLongCaptureShortcuts();
+        await stopLongCaptureNativeMode();
+        await currentWindow.hide();
         resetEditor();
         logCaptureTiming(startedAt, "window hidden");
 
@@ -1783,9 +2926,8 @@ export default function ScreenshotWindow() {
         cursorManager.setTool(ToolType.Selection);
         canvas.requestRenderAll();
 
-        const win = getCurrentWindow();
-        await win.show();
-        await win.setFocus();
+        await currentWindow.show();
+        await currentWindow.setFocus();
         logCaptureTiming(startedAt, "shown");
       } catch (error) {
         console.error("Failed to start capture:", error);
@@ -1799,6 +2941,17 @@ export default function ScreenshotWindow() {
 
   useEffect(() => {
     const handleKeyDown = async (event: KeyboardEvent) => {
+      if (longCaptureActiveRef.current) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          await closeCapture();
+        } else if (event.key === "Enter") {
+          event.preventDefault();
+          await finishLongCapture();
+        }
+        return;
+      }
+
       if (event.key === "Escape") {
         await closeCapture();
       } else if (event.key === "Enter") {
@@ -1838,6 +2991,8 @@ export default function ScreenshotWindow() {
   ]);
 
   const toolbar = useMemo(() => {
+    if (!selectionReady || isLongCaptureActive) return null;
+
     const selectedAnnotation = selectedAnnotationRef.current;
     const selectedTool = getAnnotationData(selectedAnnotation)?.tool;
     const optionTool = selectedTool ?? activeTool;
@@ -1907,7 +3062,7 @@ export default function ScreenshotWindow() {
       </div>
     );
 
-    return selectionReady ? (
+    return (
       <div
         ref={toolbarRef}
         className="capture-toolbar"
@@ -1920,28 +3075,32 @@ export default function ScreenshotWindow() {
             : undefined
         }
       >
-        <div className="toolbar-group">
-          {TOOL_BUTTONS.map(({ tool, titleKey, icon: Icon }) => (
-            <div className="tool-button-wrap" key={tool}>
-              <button
-                className={`tool-button${
-                  activeTool === tool || selectedTool === tool ? " active" : ""
-                }`}
-                type="button"
-                title={t(titleKey)}
-                onClick={() => {
-                  if (tool !== "select") selectAnnotation(null);
-                  setActiveTool(tool);
-                }}
-              >
-                <Icon size={18} />
-              </button>
-              {optionTool === tool &&
-                (showStrokeOptions || showMarkerOptions || showTextOptions) &&
-                renderToolOptions()}
-            </div>
-          ))}
-        </div>
+        {!isLongCaptureResultReady && (
+          <div className="toolbar-group">
+            {TOOL_BUTTONS.map(({ tool, titleKey, icon: Icon }) => (
+              <div className="tool-button-wrap" key={tool}>
+                <button
+                  className={`tool-button${
+                    activeTool === tool || selectedTool === tool
+                      ? " active"
+                      : ""
+                  }`}
+                  type="button"
+                  title={t(titleKey)}
+                  onClick={() => {
+                    if (tool !== "select") selectAnnotation(null);
+                    setActiveTool(tool);
+                  }}
+                >
+                  <Icon size={18} />
+                </button>
+                {optionTool === tool &&
+                  (showStrokeOptions || showMarkerOptions || showTextOptions) &&
+                  renderToolOptions()}
+              </div>
+            ))}
+          </div>
+        )}
 
         <div className="toolbar-group">
           <button
@@ -1973,6 +3132,16 @@ export default function ScreenshotWindow() {
         </div>
 
         <div className="toolbar-group">
+          {!isLongCaptureResultReady && (
+            <button
+              className="tool-button"
+              type="button"
+              title={t("screenshot.tools.longCapture")}
+              onClick={() => void startLongCapture()}
+            >
+              <LongCaptureIcon size={18} />
+            </button>
+          )}
           <button
             className="tool-button"
             type="button"
@@ -1991,23 +3160,77 @@ export default function ScreenshotWindow() {
           </button>
         </div>
       </div>
-    ) : null;
+    );
   }, [
     activeTool,
     canRedo,
     canUndo,
+    isLongCaptureActive,
+    isLongCaptureResultReady,
     markerColor,
     selectionReady,
     selectedAnnotationRevision,
     strokeColor,
     strokeWidth,
     t,
+    textSize,
     toolbarPosition,
   ]);
+
+  const longCapturePanelStyle = useMemo<CSSProperties | undefined>(() => {
+    const bounds = longCaptureBoundsRef.current;
+    if (!isLongCaptureActive || !bounds) return undefined;
+
+    const panelBounds = getLongCapturePanelBounds(bounds);
+    return { left: panelBounds.left, top: panelBounds.top };
+  }, [isLongCaptureActive, longCapture.frameCount]);
+
+  const longCapturePanel = isLongCaptureActive ? (
+    <div
+      ref={longCapturePanelRef}
+      className="long-capture-panel"
+      style={longCapturePanelStyle}
+    >
+      <div className="long-capture-preview">
+        <canvas
+          ref={longCapturePreviewCanvasRef}
+          width={LONG_CAPTURE_PREVIEW_WIDTH}
+          height={LONG_CAPTURE_PREVIEW_HEIGHT}
+          aria-label={t("screenshot.longCapture.preview")}
+        />
+      </div>
+      <div className="long-capture-content">
+        <div className="long-capture-title">
+          <LongCaptureIcon size={18} />
+          <span>{t("screenshot.longCapture.title")}</span>
+        </div>
+        <div className="long-capture-meta">
+          {t("screenshot.longCapture.meta", {
+            count: longCapture.frameCount,
+            height: longCapture.height,
+          })}
+        </div>
+        <div className="long-capture-message">
+          {longCapture.messageKey ? t(longCapture.messageKey) : null}
+        </div>
+        <div className="long-capture-shortcuts">
+          <span>
+            <kbd>Enter</kbd>
+            {t("screenshot.longCapture.finish")}
+          </span>
+          <span>
+            <kbd>Esc</kbd>
+            {t("screenshot.longCapture.cancel")}
+          </span>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   return (
     <div className="screenshot-root">
       <canvas ref={canvasElementRef} className="screenshot-canvas" />
+      {longCapturePanel}
       {toolbar}
     </div>
   );

@@ -10,6 +10,7 @@ use xcap::{Monitor, Window};
 #[derive(Debug, Serialize)]
 struct CaptureWindowRegion {
     id: u32,
+    pid: u32,
     x: f64,
     y: f64,
     width: f64,
@@ -21,6 +22,32 @@ struct CaptureWindowRegion {
     is_focused: bool,
     title: String,
     app_name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MacosPermissionStatus {
+    macos: bool,
+    accessibility: bool,
+    event_posting: bool,
+    screen_recording: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LongCaptureScrollEvent {
+    x: f64,
+    y: f64,
+    delta_x: f64,
+    delta_y: f64,
+}
+
+#[cfg(target_os = "macos")]
+thread_local! {
+    static LONG_CAPTURE_SCROLL_TAP: std::cell::RefCell<Option<core_graphics::event::CGEventTap<'static>>> =
+        const { std::cell::RefCell::new(None) };
+    static LONG_CAPTURE_SCROLL_SOURCE: std::cell::RefCell<Option<core_foundation::runloop::CFRunLoopSource>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 // 了解更多关于 Tauri 命令的信息：https://tauri.app/develop/calling-rust/
@@ -150,6 +177,11 @@ async fn ensure_screenshot_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn finish_capture(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let _ = stop_long_capture_scroll_monitor(app.clone()).await;
+    #[cfg(target_os = "macos")]
+    let _ = set_screenshot_window_ignores_mouse_events(&app, false);
+
     if let Some(window) = app.get_webview_window("screenshot_window") {
         window.hide().map_err(|e| e.to_string())?;
     }
@@ -207,18 +239,41 @@ async fn capture_fullscreen(_app: AppHandle) -> Result<tauri::ipc::Response, Str
         use std::fs;
         use std::process::Command;
 
-        // 使用 screencapture 命令行工具
-        // -x: 静音
-        // -m: 仅主显示器 (如果需要多显示器，可能需要更复杂的逻辑或不加 -m)
-        // -C: 包含光标 (可选，这里不加)
-        // 默认包含菜单栏
-
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("xshot_capture.png");
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos();
+        let temp_file = std::env::temp_dir().join(format!(
+            "xshot_capture_screen_{}_{}.png",
+            std::process::id(),
+            timestamp
+        ));
+        let screenshot_window = _app
+            .get_webview_window("screenshot_window")
+            .ok_or("Screenshot window not found")?;
+        let scale_factor = screenshot_window
+            .scale_factor()
+            .map_err(|e| e.to_string())?;
+        let position = screenshot_window
+            .inner_position()
+            .map_err(|e| e.to_string())?
+            .to_logical::<f64>(scale_factor);
+        let size = screenshot_window
+            .inner_size()
+            .map_err(|e| e.to_string())?
+            .to_logical::<f64>(scale_factor);
+        let rect = format!(
+            "{},{},{},{}",
+            position.x.round() as i64,
+            position.y.round() as i64,
+            size.width.round().max(1.0) as i64,
+            size.height.round().max(1.0) as i64
+        );
 
         let output = Command::new("screencapture")
             .arg("-x")
-            .arg("-m") // 仅截取主屏幕，如果需要截取所有屏幕，可以去掉这个参数，但处理起来会更复杂
+            .arg("-R")
+            .arg(&rect)
             .arg(&temp_file)
             .output()
             .map_err(|e| format!("Failed to execute screencapture: {}", e))?;
@@ -236,7 +291,11 @@ async fn capture_fullscreen(_app: AppHandle) -> Result<tauri::ipc::Response, Str
         // 删除临时文件
         let _ = fs::remove_file(temp_file);
 
-        println!("Capture finished in {:?}", start_time.elapsed());
+        println!(
+            "Capture screen rect {} finished in {:?}",
+            rect,
+            start_time.elapsed()
+        );
         return Ok(tauri::ipc::Response::new(bytes));
     }
 
@@ -268,6 +327,229 @@ async fn capture_fullscreen(_app: AppHandle) -> Result<tauri::ipc::Response, Str
 
         println!("Capture finished in {:?}", start_time.elapsed());
         Ok(tauri::ipc::Response::new(bytes))
+    }
+}
+
+#[tauri::command]
+async fn capture_screen_rect(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<tauri::ipc::Response, String> {
+    let start_time = std::time::Instant::now();
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::fs;
+        use std::process::Command;
+
+        if width <= 0.0 || height <= 0.0 {
+            return Err("Invalid capture rectangle".into());
+        }
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos();
+        let temp_file = std::env::temp_dir().join(format!(
+            "xshot_capture_rect_{}_{}.png",
+            std::process::id(),
+            timestamp
+        ));
+        let rect = format!(
+            "{},{},{},{}",
+            x.round() as i64,
+            y.round() as i64,
+            width.round().max(1.0) as i64,
+            height.round().max(1.0) as i64
+        );
+
+        let output = Command::new("screencapture")
+            .arg("-x")
+            .arg("-R")
+            .arg(&rect)
+            .arg(&temp_file)
+            .output()
+            .map_err(|e| format!("Failed to execute screencapture: {}", e))?;
+
+        if !output.status.success() {
+            let _ = fs::remove_file(&temp_file);
+            return Err(format!(
+                "screencapture rect failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        let bytes =
+            fs::read(&temp_file).map_err(|e| format!("Failed to read capture file: {}", e))?;
+        let _ = fs::remove_file(temp_file);
+
+        println!(
+            "Capture rect {} finished in {:?}",
+            rect,
+            start_time.elapsed()
+        );
+        Ok(tauri::ipc::Response::new(bytes))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (x, y, width, height);
+        Err("Rectangle capture is only implemented on macOS".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn screenshot_window_number(app: &AppHandle) -> Result<u32, String> {
+    use objc2_app_kit::NSWindow;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let window = app
+        .get_webview_window("screenshot_window")
+        .ok_or("Screenshot window not found")?;
+    let (sender, receiver) = mpsc::channel();
+
+    app.run_on_main_thread(move || {
+        let result = unsafe {
+            match window.ns_window() {
+                Ok(ns_window) => {
+                    let ns_window = &*(ns_window as *mut NSWindow);
+                    Ok(ns_window.windowNumber().max(0) as u32)
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        };
+        let _ = sender.send(result);
+    })
+    .map_err(|error| error.to_string())?;
+
+    receiver
+        .recv_timeout(Duration::from_millis(250))
+        .map_err(|_| "Timed out while reading screenshot window number".to_string())?
+}
+
+#[cfg(target_os = "macos")]
+fn encode_cg_image_to_png_bytes(image: &core_graphics::image::CGImage) -> Result<Vec<u8>, String> {
+    use core_foundation::base::{kCFAllocatorDefault, CFRelease, TCFType};
+    use core_foundation::data::{CFDataCreateMutable, CFDataGetBytePtr, CFDataGetLength};
+    use core_foundation::string::CFString;
+    use foreign_types::ForeignTypeRef;
+    use std::ffi::c_void;
+    use std::ptr;
+
+    let width = image.width();
+    let height = image.height();
+    if width == 0 || height == 0 {
+        return Err("Captured image is empty".into());
+    }
+
+    type CGImageDestinationRef = *mut c_void;
+
+    #[link(name = "ImageIO", kind = "framework")]
+    unsafe extern "C" {
+        fn CGImageDestinationCreateWithData(
+            data: core_foundation::data::CFMutableDataRef,
+            type_identifier: core_foundation::string::CFStringRef,
+            count: usize,
+            options: *const c_void,
+        ) -> CGImageDestinationRef;
+        fn CGImageDestinationAddImage(
+            destination: CGImageDestinationRef,
+            image: core_graphics::sys::CGImageRef,
+            properties: *const c_void,
+        );
+        fn CGImageDestinationFinalize(destination: CGImageDestinationRef) -> bool;
+    }
+
+    unsafe {
+        let data = CFDataCreateMutable(kCFAllocatorDefault, 0);
+        if data.is_null() {
+            return Err("Failed to create PNG data buffer".into());
+        }
+
+        let png_type = CFString::new("public.png");
+        let destination =
+            CGImageDestinationCreateWithData(data, png_type.as_concrete_TypeRef(), 1, ptr::null());
+        if destination.is_null() {
+            CFRelease(data as *const c_void);
+            return Err("Failed to create PNG image destination".into());
+        }
+
+        CGImageDestinationAddImage(destination, image.as_ptr(), ptr::null());
+        let finalized = CGImageDestinationFinalize(destination);
+        CFRelease(destination as *const c_void);
+
+        if !finalized {
+            CFRelease(data as *const c_void);
+            return Err("Failed to finalize PNG image destination".into());
+        }
+
+        let length = CFDataGetLength(data);
+        let bytes_ptr = CFDataGetBytePtr(data);
+        if length <= 0 || bytes_ptr.is_null() {
+            CFRelease(data as *const c_void);
+            return Err("Encoded PNG data is empty".into());
+        }
+
+        let bytes = std::slice::from_raw_parts(bytes_ptr, length as usize).to_vec();
+        CFRelease(data as *const c_void);
+        Ok(bytes)
+    }
+}
+
+#[tauri::command]
+async fn capture_screen_rect_below_screenshot_window(
+    app: AppHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<tauri::ipc::Response, String> {
+    let start_time = std::time::Instant::now();
+
+    #[cfg(target_os = "macos")]
+    {
+        use core_graphics::geometry::{CGPoint, CGRect, CGSize};
+        use core_graphics::window::{
+            create_image, kCGWindowImageBoundsIgnoreFraming, kCGWindowListOptionOnScreenBelowWindow,
+        };
+
+        if width <= 0.0 || height <= 0.0 {
+            return Err("Invalid capture rectangle".into());
+        }
+
+        let window_number = screenshot_window_number(&app)?;
+        let rect = CGRect::new(
+            &CGPoint::new(x.round(), y.round()),
+            &CGSize::new(width.round().max(1.0), height.round().max(1.0)),
+        );
+
+        let image = create_image(
+            rect,
+            kCGWindowListOptionOnScreenBelowWindow,
+            window_number,
+            kCGWindowImageBoundsIgnoreFraming,
+        )
+        .ok_or("Failed to capture screen below screenshot window")?;
+        let bytes = encode_cg_image_to_png_bytes(&image)?;
+
+        println!(
+            "Capture below-window rect {},{},{},{} finished in {:?}",
+            x.round() as i64,
+            y.round() as i64,
+            width.round().max(1.0) as i64,
+            height.round().max(1.0) as i64,
+            start_time.elapsed()
+        );
+        Ok(tauri::ipc::Response::new(bytes))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, x, y, width, height);
+        Err("Below-window rectangle capture is only implemented on macOS".into())
     }
 }
 
@@ -371,6 +653,7 @@ async fn list_capture_windows() -> Result<Vec<CaptureWindowRegion>, String> {
 
         regions.push(CaptureWindowRegion {
             id,
+            pid,
             x: (left - monitor_x) as f64,
             y: (top - monitor_y) as f64,
             width: clipped_width as f64,
@@ -440,6 +723,485 @@ async fn save_to_downloads(
     Ok(path.to_string_lossy().to_string())
 }
 
+fn macos_accessibility_trusted() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe {
+            #[link(name = "ApplicationServices", kind = "framework")]
+            unsafe extern "C" {
+                fn AXIsProcessTrusted() -> u8;
+            }
+
+            AXIsProcessTrusted() != 0
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+fn macos_screen_recording_authorized() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe {
+            #[link(name = "CoreGraphics", kind = "framework")]
+            unsafe extern "C" {
+                fn CGPreflightScreenCaptureAccess() -> bool;
+            }
+
+            CGPreflightScreenCaptureAccess()
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+fn macos_event_posting_authorized() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe {
+            #[link(name = "CoreGraphics", kind = "framework")]
+            unsafe extern "C" {
+                fn CGPreflightPostEventAccess() -> bool;
+            }
+
+            CGPreflightPostEventAccess()
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+fn macos_request_accessibility_trust() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe {
+            use core_foundation::base::TCFType;
+            use core_foundation::boolean::CFBoolean;
+            use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
+            use core_foundation::string::{CFString, CFStringRef};
+
+            #[link(name = "ApplicationServices", kind = "framework")]
+            unsafe extern "C" {
+                static kAXTrustedCheckOptionPrompt: CFStringRef;
+                fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> u8;
+            }
+
+            let prompt_key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
+            let prompt_value = CFBoolean::true_value();
+            let options: CFDictionary<CFString, CFBoolean> =
+                CFDictionary::from_CFType_pairs(&[(prompt_key, prompt_value)]);
+
+            AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) != 0
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+fn macos_request_event_posting_access() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe {
+            #[link(name = "CoreGraphics", kind = "framework")]
+            unsafe extern "C" {
+                fn CGRequestPostEventAccess() -> bool;
+            }
+
+            CGRequestPostEventAccess()
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+fn macos_request_screen_recording_access() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe {
+            #[link(name = "CoreGraphics", kind = "framework")]
+            unsafe extern "C" {
+                fn CGRequestScreenCaptureAccess() -> bool;
+            }
+
+            CGRequestScreenCaptureAccess()
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_screenshot_window_ignores_mouse_events(
+    app: &AppHandle,
+    ignores_mouse_events: bool,
+) -> Result<(), String> {
+    use objc2_app_kit::NSWindow;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let window = app
+        .get_webview_window("screenshot_window")
+        .ok_or("Screenshot window not found")?;
+    let (sender, receiver) = mpsc::channel();
+
+    app.run_on_main_thread(move || {
+        let result = unsafe {
+            match window.ns_window() {
+                Ok(ns_window) => {
+                    let ns_window = &*(ns_window as *mut NSWindow);
+                    ns_window.setIgnoresMouseEvents(ignores_mouse_events);
+                    Ok(())
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        };
+        let _ = sender.send(result);
+    })
+    .map_err(|error| error.to_string())?;
+
+    receiver
+        .recv_timeout(Duration::from_millis(250))
+        .map_err(|_| "Timed out while updating screenshot mouse passthrough".to_string())?
+}
+
+#[tauri::command]
+async fn is_accessibility_trusted() -> bool {
+    macos_accessibility_trusted() && macos_event_posting_authorized()
+}
+
+#[tauri::command]
+async fn get_macos_permissions() -> MacosPermissionStatus {
+    MacosPermissionStatus {
+        macos: cfg!(target_os = "macos"),
+        accessibility: macos_accessibility_trusted(),
+        event_posting: macos_event_posting_authorized(),
+        screen_recording: macos_screen_recording_authorized(),
+    }
+}
+
+#[tauri::command]
+async fn open_macos_permission_settings(kind: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let url = match kind.as_str() {
+            "accessibility" => {
+                let _ = macos_request_accessibility_trust();
+                let _ = macos_request_event_posting_access();
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+            }
+            "screenRecording" => {
+                let _ = macos_request_screen_recording_access();
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+            }
+            _ => return Err(format!("Unknown permission kind: {}", kind)),
+        };
+
+        let status = std::process::Command::new("open")
+            .arg(url)
+            .status()
+            .map_err(|error| format!("Failed to open System Settings: {}", error))?;
+
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "System Settings exited with status: {}",
+                status
+                    .code()
+                    .map_or_else(|| "unknown".to_string(), |code| code.to_string())
+            ))
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = kind;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+async fn post_scroll_wheel(
+    app: AppHandle,
+    x: f64,
+    y: f64,
+    delta_x: i32,
+    delta_y: i32,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use std::ffi::c_void;
+
+        if !macos_event_posting_authorized() {
+            return Err("Event posting permission is not granted".into());
+        }
+
+        #[repr(C)]
+        struct CGPoint {
+            x: f64,
+            y: f64,
+        }
+
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGEventSourceCreate(state_id: u32) -> *mut c_void;
+            fn CGEventCreateScrollWheelEvent(
+                source: *mut c_void,
+                units: u32,
+                wheel_count: u32,
+                wheel1: i32,
+                ...
+            ) -> *mut c_void;
+            fn CGEventSetLocation(event: *mut c_void, location: CGPoint);
+            fn CGEventPost(tap: u32, event: *mut c_void);
+        }
+
+        #[link(name = "CoreFoundation", kind = "framework")]
+        unsafe extern "C" {
+            fn CFRelease(cf: *const c_void);
+        }
+
+        // 0 = pixel-based wheel event. wheel1 is vertical, wheel2 is horizontal.
+        let source = CGEventSourceCreate(0);
+        let event = CGEventCreateScrollWheelEvent(source, 0, 2, delta_y, delta_x);
+
+        if event.is_null() {
+            if !source.is_null() {
+                CFRelease(source);
+            }
+            return Err("Failed to create scroll wheel event".into());
+        }
+
+        CGEventSetLocation(event, CGPoint { x, y });
+        if let Err(error) = set_screenshot_window_ignores_mouse_events(&app, true) {
+            CFRelease(event);
+            if !source.is_null() {
+                CFRelease(source);
+            }
+            return Err(error);
+        }
+        // 0 = kCGHIDEventTap. With the overlay temporarily mouse-transparent,
+        // WindowServer routes the wheel event to the real window under the point.
+        CGEventPost(0, event);
+        CFRelease(event);
+        if !source.is_null() {
+            CFRelease(source);
+        }
+
+        let reset_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            std::thread::sleep(std::time::Duration::from_millis(90));
+            let _ = set_screenshot_window_ignores_mouse_events(&reset_app, false);
+        });
+
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, x, y, delta_x, delta_y);
+        Err("Scroll forwarding is only implemented on macOS".into())
+    }
+}
+
+#[tauri::command]
+async fn passthrough_screenshot_mouse_events(
+    app: AppHandle,
+    duration_ms: u64,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let duration_ms = duration_ms.clamp(120, 2_500);
+        set_screenshot_window_ignores_mouse_events(&app, true)?;
+
+        tauri::async_runtime::spawn(async move {
+            std::thread::sleep(std::time::Duration::from_millis(duration_ms));
+            let _ = set_screenshot_window_ignores_mouse_events(&app, false);
+        });
+
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, duration_ms);
+        Err("Mouse passthrough is only implemented on macOS".into())
+    }
+}
+
+#[tauri::command]
+async fn set_screenshot_mouse_passthrough(app: AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        set_screenshot_window_ignores_mouse_events(&app, enabled)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, enabled);
+        Ok(())
+    }
+}
+
+#[tauri::command]
+async fn start_long_capture_scroll_monitor(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+        use core_graphics::event::{
+            CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+            CallbackResult, EventField,
+        };
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (sender, receiver) = mpsc::channel();
+        let emit_app = app.clone();
+
+        app.run_on_main_thread(move || {
+            let result = LONG_CAPTURE_SCROLL_TAP.with(|tap_cell| -> Result<(), String> {
+                if tap_cell.borrow().is_some() {
+                    return Ok(());
+                }
+
+                let callback_app = emit_app.clone();
+                let tap = CGEventTap::new(
+                    CGEventTapLocation::Session,
+                    CGEventTapPlacement::HeadInsertEventTap,
+                    CGEventTapOptions::Default,
+                    vec![CGEventType::ScrollWheel],
+                    move |_proxy, event_type, event| {
+                        if matches!(event_type, CGEventType::ScrollWheel) {
+                            let location = event.location();
+                            let point_delta_y = event.get_double_value_field(
+                                EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1,
+                            );
+                            let point_delta_x = event.get_double_value_field(
+                                EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2,
+                            );
+                            let line_delta_y = event.get_integer_value_field(
+                                EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1,
+                            ) as f64;
+                            let line_delta_x = event.get_integer_value_field(
+                                EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2,
+                            ) as f64;
+                            let delta_y = if point_delta_y.abs() > f64::EPSILON {
+                                point_delta_y
+                            } else {
+                                line_delta_y
+                            };
+                            let delta_x = if point_delta_x.abs() > f64::EPSILON {
+                                point_delta_x
+                            } else {
+                                line_delta_x
+                            };
+
+                            let is_downward_scroll =
+                                delta_y < 0.0 && delta_y.abs() >= delta_x.abs();
+                            if !is_downward_scroll {
+                                return CallbackResult::Drop;
+                            }
+
+                            let _ = callback_app.emit_to(
+                                "screenshot_window",
+                                "long-capture-scroll",
+                                LongCaptureScrollEvent {
+                                    x: location.x,
+                                    y: location.y,
+                                    delta_x,
+                                    delta_y,
+                                },
+                            );
+                        }
+
+                        CallbackResult::Keep
+                    },
+                )
+                .map_err(|_| "Failed to create long capture scroll monitor".to_string())?;
+
+                let source = tap.mach_port().create_runloop_source(0).map_err(|_| {
+                    "Failed to create long capture scroll run loop source".to_string()
+                })?;
+                CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
+                tap.enable();
+
+                LONG_CAPTURE_SCROLL_SOURCE.with(|source_cell| {
+                    *source_cell.borrow_mut() = Some(source);
+                });
+                *tap_cell.borrow_mut() = Some(tap);
+                Ok(())
+            });
+
+            let _ = sender.send(result);
+        })
+        .map_err(|error| error.to_string())?;
+
+        receiver
+            .recv_timeout(Duration::from_millis(500))
+            .map_err(|_| "Timed out while starting long capture scroll monitor".to_string())?
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Ok(())
+    }
+}
+
+#[tauri::command]
+async fn stop_long_capture_scroll_monitor(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (sender, receiver) = mpsc::channel();
+
+        app.run_on_main_thread(move || {
+            LONG_CAPTURE_SCROLL_SOURCE.with(|source_cell| {
+                if let Some(source) = source_cell.borrow_mut().take() {
+                    CFRunLoop::get_current()
+                        .remove_source(&source, unsafe { kCFRunLoopCommonModes });
+                }
+            });
+            LONG_CAPTURE_SCROLL_TAP.with(|tap_cell| {
+                let _ = tap_cell.borrow_mut().take();
+            });
+            let _ = sender.send(Ok(()));
+        })
+        .map_err(|error| error.to_string())?;
+
+        receiver
+            .recv_timeout(Duration::from_millis(500))
+            .map_err(|_| "Timed out while stopping long capture scroll monitor".to_string())?
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Ok(())
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -450,6 +1212,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             capture_fullscreen,
+            capture_screen_rect,
+            capture_screen_rect_below_screenshot_window,
             list_capture_windows,
             copy_to_clipboard,
             save_to_downloads,
@@ -457,7 +1221,15 @@ pub fn run() {
             set_dock_icon_visible,
             finish_capture,
             open_devtools,
-            open_screenshot_devtools
+            open_screenshot_devtools,
+            is_accessibility_trusted,
+            get_macos_permissions,
+            open_macos_permission_settings,
+            post_scroll_wheel,
+            passthrough_screenshot_mouse_events,
+            set_screenshot_mouse_passthrough,
+            start_long_capture_scroll_monitor,
+            stop_long_capture_scroll_monitor
         ])
         .setup(|app| {
             let handle = app.handle().clone();

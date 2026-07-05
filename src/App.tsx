@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -7,13 +7,16 @@ import {
   AppWindowMac,
   Check,
   Crosshair,
+  ExternalLink,
   FolderOpen,
   Keyboard,
   Languages,
   Pencil,
   Power,
+  RefreshCw,
   RotateCcw,
   Settings2,
+  ShieldCheck,
   X,
 } from "lucide-react";
 import {
@@ -43,6 +46,15 @@ const MODIFIER_KEYS = new Set([
   "Shift",
   "Super",
 ]);
+
+type MacosPermissionKind = "accessibility" | "screenRecording";
+
+type MacosPermissionStatus = {
+  macos: boolean;
+  accessibility: boolean;
+  eventPosting: boolean;
+  screenRecording: boolean;
+};
 
 function normalizeKey(key: string) {
   if (/^[a-z]$/i.test(key)) return key.toUpperCase();
@@ -150,6 +162,10 @@ function App() {
   const [draftShortcut, setDraftShortcut] = useState(getShortcut);
   const [settings, setSettings] = useState(getSettings);
   const [autoStart, setAutoStart] = useState(false);
+  const [permissions, setPermissions] = useState<MacosPermissionStatus | null>(
+    null
+  );
+  const [isRefreshingPermissions, setIsRefreshingPermissions] = useState(false);
   const [isEditingShortcut, setIsEditingShortcut] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [status, setStatus] = useState("");
@@ -160,6 +176,59 @@ function App() {
   );
   const saveDirectoryLabel =
     settings.defaultSaveDirectory || t("settings.defaultSaveDirectoryEmpty");
+
+  const refreshPermissions = useCallback(async () => {
+    if (!isMac) {
+      setPermissions({
+        macos: false,
+        accessibility: true,
+        eventPosting: true,
+        screenRecording: true,
+      });
+      return;
+    }
+
+    setIsRefreshingPermissions(true);
+    try {
+      const nextPermissions = await invoke<MacosPermissionStatus>(
+        "get_macos_permissions"
+      );
+      setPermissions(nextPermissions);
+    } catch (error) {
+      console.warn("Failed to read macOS permissions:", error);
+      setStatus(t("settings.status.permissionsReadFailed"));
+    } finally {
+      setIsRefreshingPermissions(false);
+    }
+  }, [isMac, t]);
+
+  useEffect(() => {
+    void refreshPermissions();
+
+    const handleFocus = () => void refreshPermissions();
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") void refreshPermissions();
+    };
+
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [refreshPermissions]);
+
+  const openPermissionSettings = async (kind: MacosPermissionKind) => {
+    try {
+      await invoke("open_macos_permission_settings", { kind });
+      setStatus(t("settings.status.permissionsOpened"));
+      window.setTimeout(() => void refreshPermissions(), 700);
+    } catch (error) {
+      console.warn("Failed to open macOS permission settings:", error);
+      setStatus(t("settings.status.permissionsOpenFailed"));
+    }
+  };
 
   const applySettings = (patch: Partial<AppSettings>) => {
     const nextSettings = updateSettings(patch);
@@ -274,6 +343,23 @@ function App() {
     setStatus(i18n.t("settings.status.updated"));
   };
 
+  const permissionRows = [
+    {
+      kind: "accessibility" as const,
+      icon: <ShieldCheck size={17} />,
+      title: t("settings.permissions.accessibility"),
+      hint: t("settings.permissions.accessibilityHint"),
+      granted: permissions?.accessibility,
+    },
+    {
+      kind: "screenRecording" as const,
+      icon: <AppWindowMac size={17} />,
+      title: t("settings.permissions.screenRecording"),
+      hint: t("settings.permissions.screenRecordingHint"),
+      granted: permissions?.screenRecording,
+    },
+  ];
+
   return (
     <main className="settings-shell">
       <div className="settings-panel">
@@ -383,6 +469,83 @@ function App() {
                 </button>
               </>
             )}
+          </div>
+        </section>
+
+        <section className="settings-section permissions-section">
+          <div className="section-heading">
+            <label>{t("settings.permissions.title")}</label>
+            <button
+              className={
+                isRefreshingPermissions
+                  ? "section-icon-button is-loading"
+                  : "section-icon-button"
+              }
+              type="button"
+              onClick={() => void refreshPermissions()}
+              title={t("settings.permissions.refresh")}
+              aria-label={t("settings.permissions.refresh")}
+            >
+              <RefreshCw size={15} />
+            </button>
+          </div>
+
+          <div className="settings-list">
+            {permissionRows.map((permission) => {
+              const isGranted = permission.granted === true;
+              const isMissing = permission.granted === false;
+              const stateLabel =
+                permission.granted === undefined
+                  ? t("settings.permissions.checking")
+                  : isGranted
+                    ? t("settings.permissions.granted")
+                    : t("settings.permissions.missing");
+
+              return (
+                <div
+                  className="settings-row permission-row"
+                  key={permission.kind}
+                >
+                  <div className="settings-row-icon">{permission.icon}</div>
+                  <div className="settings-row-copy">
+                    <div className="settings-row-title">
+                      <span>{permission.title}</span>
+                      {!isMac && (
+                        <span className="settings-row-badge">
+                          {t("settings.macOnly")}
+                        </span>
+                      )}
+                    </div>
+                    <p>{permission.hint}</p>
+                  </div>
+                  <div className="permission-actions">
+                    <span
+                      className={
+                        isGranted
+                          ? "permission-state granted"
+                          : isMissing
+                            ? "permission-state missing"
+                            : "permission-state"
+                      }
+                    >
+                      {stateLabel}
+                    </span>
+                    <button
+                      className="permission-action"
+                      type="button"
+                      disabled={!isMac}
+                      onClick={() =>
+                        void openPermissionSettings(permission.kind)
+                      }
+                      title={t("settings.permissions.openSettings")}
+                    >
+                      <ExternalLink size={14} />
+                      <span>{t("settings.permissions.openSettings")}</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </section>
 
