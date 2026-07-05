@@ -73,6 +73,24 @@ type RawCaptureWindowRegion = {
   title: string;
   app_name: string;
 };
+type CaptureStartPayload = {
+  id: number;
+  label: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scaleFactor: number;
+  isPrimary: boolean;
+  name: string;
+};
+type CaptureHoverPointPayload = {
+  label: string;
+  x: number;
+  y: number;
+  monitorWidth: number;
+  monitorHeight: number;
+};
 type EditorTool =
   | "select"
   | "sequence"
@@ -921,6 +939,7 @@ function isAnnotation(object: fabric.Object) {
 
 export default function ScreenshotWindow() {
   const { t } = useTranslation();
+  const currentWindowLabelRef = useRef(getCurrentWindow().label);
   const canvasElementRef = useRef<HTMLCanvasElement>(null);
   const longCapturePreviewCanvasRef = useRef<HTMLCanvasElement>(null);
   const longCapturePanelRef = useRef<HTMLDivElement | null>(null);
@@ -948,6 +967,7 @@ export default function ScreenshotWindow() {
   const longCaptureWindowOriginRef = useRef<Point>({ x: 0, y: 0 });
   const longCaptureRectCaptureFailedRef = useRef(false);
   const longCaptureLastScrollCaptureAtRef = useRef(0);
+  const currentCaptureMonitorRef = useRef<CaptureStartPayload | null>(null);
   const dragStartRef = useRef<Point | null>(null);
   const selectionDragRef = useRef<SelectionDragState | null>(null);
   const windowRegionsRef = useRef<CaptureWindowRegion[]>([]);
@@ -1392,6 +1412,15 @@ export default function ScreenshotWindow() {
     );
 
   const updateLongCaptureWindowOrigin = async () => {
+    const monitor = currentCaptureMonitorRef.current;
+    if (monitor && monitor.label === currentWindowLabelRef.current) {
+      longCaptureWindowOriginRef.current = {
+        x: monitor.x,
+        y: monitor.y,
+      };
+      return;
+    }
+
     const win = getCurrentWindow();
     const [position, scaleFactor] = await Promise.all([
       win.innerPosition(),
@@ -1438,6 +1467,28 @@ export default function ScreenshotWindow() {
       selectionImgRef.current?.set("visible", false);
       fabricCanvasRef.current?.requestRenderAll();
     }
+  };
+
+  const previewHoverWindowAtPoint = (point: Point) => {
+    const canvas = fabricCanvasRef.current;
+    if (
+      !canvas ||
+      activeToolRef.current !== "select" ||
+      isDraggingRef.current ||
+      selectionBoundsRef.current ||
+      longCaptureActiveRef.current
+    ) {
+      return;
+    }
+
+    const hoveredWindow = getWindowAtPoint(clampPointToCanvas(point, canvas));
+    if (hoveredWindow) {
+      hoverWindowRef.current = hoveredWindow;
+      updateSelection(hoveredWindow);
+    } else {
+      clearHoverWindowPreview();
+    }
+    cursorManager.setCursor("crosshair");
   };
 
   const makeSelectionClipPath = () => {
@@ -2140,6 +2191,7 @@ export default function ScreenshotWindow() {
       console.warn("Failed to stop long capture scroll monitor:", error);
     });
     await invoke("set_screenshot_mouse_passthrough", {
+      windowLabel: currentWindowLabelRef.current,
       enabled: false,
     }).catch((error) => {
       console.warn("Failed to restore screenshot mouse passthrough:", error);
@@ -2171,6 +2223,7 @@ export default function ScreenshotWindow() {
       const imageBytes = await invoke<ArrayBuffer>(
         "capture_screen_rect_below_screenshot_window",
         {
+          windowLabel: currentWindowLabelRef.current,
           x: rect.x,
           y: rect.y,
           width: rect.width,
@@ -2680,9 +2733,12 @@ export default function ScreenshotWindow() {
 
     try {
       await invoke("set_screenshot_mouse_passthrough", {
+        windowLabel: currentWindowLabelRef.current,
         enabled: true,
       });
-      await invoke("start_long_capture_scroll_monitor");
+      await invoke("start_long_capture_scroll_monitor", {
+        windowLabel: currentWindowLabelRef.current,
+      });
     } catch (error) {
       console.warn("Failed to enter native long capture mode:", error);
       await stopLongCaptureNativeMode();
@@ -2745,6 +2801,7 @@ export default function ScreenshotWindow() {
     const arrayBuffer = await blob.arrayBuffer();
     await invoke("show_pin_window", {
       blobData: new Uint8Array(arrayBuffer),
+      windowLabel: currentWindowLabelRef.current,
     });
     await closeCapture();
   };
@@ -3340,17 +3397,27 @@ export default function ScreenshotWindow() {
   }, []);
 
   useEffect(() => {
-    const unlisten = listen("start-capture", async () => {
+    const unlisten = listen<CaptureStartPayload>("start-capture", async (event) => {
       const startedAt = performance.now();
       try {
         const currentWindow = getCurrentWindow();
+        currentWindowLabelRef.current = currentWindow.label;
+        if (
+          event.payload?.label &&
+          event.payload.label !== currentWindowLabelRef.current
+        ) {
+          return;
+        }
         await unregisterLongCaptureShortcuts();
         await stopLongCaptureNativeMode();
         await currentWindow.hide();
         resetEditor();
+        currentCaptureMonitorRef.current = event.payload ?? null;
         logCaptureTiming(startedAt, "window hidden");
 
-        const imageBytes = await invoke<ArrayBuffer>("capture_fullscreen");
+        const imageBytes = await invoke<ArrayBuffer>("capture_fullscreen", {
+          windowLabel: currentWindowLabelRef.current,
+        });
         logCaptureTiming(startedAt, "screen captured");
         const blob = new Blob([imageBytes], { type: "image/png" });
         const url = URL.createObjectURL(blob);
@@ -3369,7 +3436,8 @@ export default function ScreenshotWindow() {
         const scale = canvas.getWidth() / img.width;
         scaleRef.current = scale;
         const captureWindows = await invoke<RawCaptureWindowRegion[]>(
-          "list_capture_windows"
+          "list_capture_windows",
+          { windowLabel: currentWindowLabelRef.current }
         ).catch((error) => {
           console.warn("Failed to list capture windows:", error);
           return [];
@@ -3427,6 +3495,44 @@ export default function ScreenshotWindow() {
       } catch (error) {
         console.error("Failed to start capture:", error);
       }
+    });
+
+    return () => {
+      unlisten.then((dispose) => dispose());
+    };
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<CaptureHoverPointPayload>(
+      "capture-hover-point",
+      (event) => {
+        const payload = event.payload;
+        if (!payload || payload.label !== currentWindowLabelRef.current) {
+          return;
+        }
+
+        const canvas = fabricCanvasRef.current;
+        if (!canvas) return;
+
+        previewHoverWindowAtPoint({
+          x:
+            payload.x *
+            (canvas.getWidth() / Math.max(1, payload.monitorWidth)),
+          y:
+            payload.y *
+            (canvas.getHeight() / Math.max(1, payload.monitorHeight)),
+        });
+      }
+    );
+
+    return () => {
+      unlisten.then((dispose) => dispose());
+    };
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen("capture-hover-clear", () => {
+      clearHoverWindowPreview();
     });
 
     return () => {

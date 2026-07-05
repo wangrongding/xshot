@@ -1,7 +1,16 @@
 # xshot
 
 <p align="center">
-  <a href="./README.md">简体中文</a> | <a href="./README.en.md">English</a>
+  <a href="./README.md">简体中文</a> |
+  <a href="./README.en.md">English</a> |
+  <a href="./README.zh-TW.md">繁體中文</a> |
+  <a href="./README.ja.md">日本語</a> |
+  <a href="./README.ko.md">한국어</a> |
+  <a href="./README.es.md">Español</a> |
+  <a href="./README.fr.md">Français</a> |
+  <a href="./README.de.md">Deutsch</a> |
+  <a href="./README.pt-BR.md">Português (Brasil)</a> |
+  <a href="./README.ru.md">Русский</a>
 </p>
 
 <p align="center">
@@ -14,7 +23,9 @@
 
 xshot is a desktop screenshot tool for quick capture, window/region selection, annotation, scrolling capture, crop, pin-to-screen, clipboard copy, and PNG saving. It is designed to be used from the tray and a global shortcut.
 
-![screenshot/xshot.jpeg](./screenshot/xshot.jpeg)
+## Documentation Languages
+
+The Simplified Chinese README is the source of truth for documentation. When feature descriptions, installation notes, limitations, or the roadmap change, update `README.md` first and then sync the English, Traditional Chinese, Japanese, Korean, Spanish, French, German, Brazilian Portuguese, and Russian versions.
 
 ## Core Features
 
@@ -23,6 +34,8 @@ xshot is a desktop screenshot tool for quick capture, window/region selection, a
 - ✅ Supports OCR text recognition, QR recognition, text translation, and translation overlay.
 - ✅ Supports annotation tools: number marker, arrow, rectangle, line, text, pen, eraser, and mosaic area.
 - ✅ Supports window hover detection: move over a candidate window and click to select it.
+
+![screenshot/xshot.jpeg](./screenshot/xshot.jpeg)
 
 ## Usage
 
@@ -48,7 +61,7 @@ After launch, xshot runs from the tray. You can start a capture by:
 - Dock icon: macOS-only option for showing the app in the Dock.
 - Launch at login: start xshot automatically after sign-in.
 - Default save location: downloaded screenshots are saved here first; otherwise Downloads is used.
-- Language: Simplified Chinese and English.
+- Interface language: currently supports Simplified Chinese and English.
 - Permissions: on macOS, view Screen Recording and Accessibility authorization status and open the matching System Settings pane.
 
 ## Current Capture Pipeline

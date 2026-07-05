@@ -1,5 +1,4 @@
 import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
-import { emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 
 export const DEFAULT_SHORTCUT = "Alt+X";
@@ -23,8 +22,7 @@ export function getShortcut() {
 }
 
 export async function startCapture() {
-  await invoke("ensure_screenshot_window");
-  await emit("start-capture");
+  await invoke("start_capture");
 }
 
 async function registerAccelerator(shortcut: string) {

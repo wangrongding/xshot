@@ -1,16 +1,35 @@
 #[cfg(not(target_os = "macos"))]
 use image::ImageEncoder;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
+};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use xcap::{Monitor, Window};
 
 mod ocr;
 mod translation;
+
+const SCREENSHOT_WINDOW_PREFIX: &str = "screenshot_window";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptureMonitor {
+    id: u32,
+    label: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    scale_factor: f64,
+    is_primary: bool,
+    name: String,
+}
 
 #[derive(Debug, Serialize)]
 struct CaptureWindowRegion {
@@ -60,6 +79,24 @@ struct PinWindowPayload {
 #[derive(Default)]
 struct PinWindowStore(Mutex<HashMap<String, PinWindowPayload>>);
 
+#[derive(Default)]
+struct PreparedCaptureStore(Mutex<HashMap<String, Vec<u8>>>);
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct CaptureFocusFollowerState(std::sync::atomic::AtomicU64);
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptureHoverPointPayload {
+    label: String,
+    x: f64,
+    y: f64,
+    monitor_width: f64,
+    monitor_height: f64,
+}
+
 #[cfg(target_os = "macos")]
 thread_local! {
     static LONG_CAPTURE_SCROLL_TAP: std::cell::RefCell<Option<core_graphics::event::CGEventTap<'static>>> =
@@ -87,7 +124,7 @@ fn open_devtools(window: WebviewWindow) {
 fn open_screenshot_devtools(app: AppHandle) {
     #[cfg(debug_assertions)]
     {
-        if let Some(window) = app.get_webview_window("screenshot_window") {
+        if let Some((_, window)) = screenshot_windows(&app).into_iter().next() {
             window.open_devtools();
         }
     }
@@ -96,99 +133,393 @@ fn open_screenshot_devtools(app: AppHandle) {
     let _ = app;
 }
 
-#[tauri::command]
-async fn ensure_screenshot_window(app: AppHandle) -> Result<(), String> {
-    let label = "screenshot_window";
+fn screenshot_window_label(monitor_id: u32) -> String {
+    format!("{}_{}", SCREENSHOT_WINDOW_PREFIX, monitor_id)
+}
 
-    let window = if let Some(window) = app.get_webview_window(label) {
-        // println!("Window already exists");
-        window
-    } else {
-        println!("Creating new screenshot window...");
-        let window = WebviewWindowBuilder::new(&app, label, WebviewUrl::App("/screenshot".into()))
-            .title("Screenshot")
-            .visible(false)
-            .decorations(false)
-            .resizable(false)
-            .minimizable(false)
-            .maximizable(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .transparent(true)
-            .build()
-            .map_err(|e| e.to_string())?;
+fn is_screenshot_window_label(label: &str) -> bool {
+    label == SCREENSHOT_WINDOW_PREFIX
+        || label
+            .strip_prefix(SCREENSHOT_WINDOW_PREFIX)
+            .is_some_and(|suffix| suffix.starts_with('_'))
+}
 
-        println!("Screenshot window created successfully");
-        window
+fn screenshot_windows(app: &AppHandle) -> Vec<(String, WebviewWindow)> {
+    app.webview_windows()
+        .into_iter()
+        .filter(|(label, _)| is_screenshot_window_label(label))
+        .collect()
+}
+
+fn first_screenshot_window_label(app: &AppHandle) -> Option<String> {
+    screenshot_windows(app)
+        .into_iter()
+        .map(|(label, _)| label)
+        .next()
+}
+
+fn capture_monitors() -> Result<Vec<CaptureMonitor>, String> {
+    let mut monitors = Monitor::all()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|monitor| {
+            let id = monitor.id().map_err(|e| e.to_string())?;
+            Ok(CaptureMonitor {
+                id,
+                label: screenshot_window_label(id),
+                x: monitor.x().map_err(|e| e.to_string())? as f64,
+                y: monitor.y().map_err(|e| e.to_string())? as f64,
+                width: monitor.width().map_err(|e| e.to_string())? as f64,
+                height: monitor.height().map_err(|e| e.to_string())? as f64,
+                scale_factor: monitor.scale_factor().unwrap_or(1.0) as f64,
+                is_primary: monitor.is_primary().unwrap_or(false),
+                name: monitor.name().unwrap_or_else(|_| format!("Display {}", id)),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    monitors.sort_by(|a, b| {
+        b.is_primary
+            .cmp(&a.is_primary)
+            .then_with(|| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    Ok(monitors)
+}
+
+#[cfg(target_os = "macos")]
+fn apply_macos_screenshot_window_style(
+    app: &AppHandle,
+    window: WebviewWindow,
+) -> Result<(), String> {
+    use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (sender, receiver) = mpsc::channel();
+    app.run_on_main_thread(move || {
+        let result = unsafe {
+            match window.ns_window() {
+                Ok(ns_window) => {
+                    let ns_window = &*(ns_window as *mut NSWindow);
+                    ns_window.setLevel(25);
+                    ns_window.setIgnoresMouseEvents(false);
+                    ns_window.setAcceptsMouseMovedEvents(true);
+                    ns_window.setCollectionBehavior(
+                        ns_window.collectionBehavior()
+                            | NSWindowCollectionBehavior::CanJoinAllSpaces
+                            | NSWindowCollectionBehavior::FullScreenAuxiliary,
+                    );
+                    Ok(())
+                }
+                Err(error) => Err(error.to_string()),
+            }
+        };
+        let _ = sender.send(result);
+    })
+    .map_err(|error| error.to_string())?;
+
+    receiver
+        .recv_timeout(Duration::from_millis(500))
+        .map_err(|_| "Timed out while preparing screenshot window".to_string())?
+}
+
+fn configure_screenshot_window(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    monitor: &CaptureMonitor,
+) -> Result<(), String> {
+    window
+        .set_position(LogicalPosition::new(monitor.x, monitor.y))
+        .map_err(|error| error.to_string())?;
+    window
+        .set_size(LogicalSize::new(monitor.width, monitor.height))
+        .map_err(|error| error.to_string())?;
+    let _ = window.set_always_on_top(true);
+    let _ = window.set_visible_on_all_workspaces(true);
+
+    #[cfg(target_os = "macos")]
+    apply_macos_screenshot_window_style(app, window.clone())?;
+
+    Ok(())
+}
+
+fn hide_screenshot_windows(app: &AppHandle) -> Result<(), String> {
+    for (_, window) in screenshot_windows(app) {
+        window.hide().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn focus_screenshot_window_for_hover(app: &AppHandle, label: &str) -> bool {
+    use objc2_app_kit::NSWindow;
+
+    let Some(window) = app.get_webview_window(label) else {
+        return false;
     };
 
-    // 确保截图窗口大小和位置正确（尤其是在多显示器环境下）
-    #[cfg(target_os = "macos")]
-    unsafe {
-        use objc2::rc::Retained;
-        use objc2_app_kit::{NSEvent, NSScreen, NSWindow, NSWindowCollectionBehavior};
-        use objc2_foundation::MainThreadMarker;
+    if !window.is_visible().unwrap_or(false) {
+        return false;
+    }
 
-        let window_handle = window.clone();
-        let _ = app.run_on_main_thread(move || {
-            let _mtm = MainThreadMarker::new_unchecked();
+    let _ = window.set_focus();
+    let ns_window_handle = window.clone();
+    let _ = app.run_on_main_thread(move || unsafe {
+        if let Ok(ns_window) = ns_window_handle.ns_window() {
+            let ns_window = &*(ns_window as *mut NSWindow);
+            ns_window.setAcceptsMouseMovedEvents(true);
+            ns_window.makeKeyAndOrderFront(None);
+        }
+    });
 
-            // 获取鼠标位置
-            let mouse_loc = NSEvent::mouseLocation();
-            let screens = NSScreen::screens(_mtm);
-            let count = screens.count();
-            let mut target_screen = None;
+    true
+}
 
-            // 查找鼠标所在的屏幕
-            for i in 0..count {
-                let screen = screens.objectAtIndex(i);
-                let frame = screen.frame();
-                if mouse_loc.x >= frame.origin.x
-                    && mouse_loc.x < frame.origin.x + frame.size.width
-                    && mouse_loc.y >= frame.origin.y
-                    && mouse_loc.y < frame.origin.y + frame.size.height
+#[cfg(target_os = "macos")]
+fn start_capture_focus_follower(app: AppHandle, monitors: Vec<CaptureMonitor>) {
+    use core_graphics::event::CGEvent;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    let generation = app
+        .state::<CaptureFocusFollowerState>()
+        .0
+        .fetch_add(1, Ordering::SeqCst)
+        + 1;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let event_source = match CGEventSource::new(CGEventSourceStateID::CombinedSessionState) {
+            Ok(source) => source,
+            Err(_) => return,
+        };
+        let mut active_label: Option<String> = None;
+
+        while app
+            .state::<CaptureFocusFollowerState>()
+            .0
+            .load(Ordering::SeqCst)
+            == generation
+        {
+            let target_monitor = CGEvent::new(event_source.clone())
+                .ok()
+                .map(|event| event.location())
+                .and_then(|point| {
+                    monitors.iter().find(|monitor| {
+                        point.x >= monitor.x
+                            && point.x < monitor.x + monitor.width
+                            && point.y >= monitor.y
+                            && point.y < monitor.y + monitor.height
+                    })
+                });
+
+            if let Some(monitor) = target_monitor {
+                if active_label.as_deref() != Some(monitor.label.as_str())
+                    && focus_screenshot_window_for_hover(&app, &monitor.label)
                 {
-                    target_screen = Some(screen);
-                    break;
+                    if let Some(previous_label) = active_label.as_deref() {
+                        let _ = app.emit_to(previous_label, "capture-hover-clear", ());
+                    }
+                    active_label = Some(monitor.label.clone());
+                    if let Ok(event) = CGEvent::new(event_source.clone()) {
+                        let point = event.location();
+                        let _ = app.emit_to(
+                            monitor.label.as_str(),
+                            "capture-hover-point",
+                            CaptureHoverPointPayload {
+                                label: monitor.label.clone(),
+                                x: point.x - monitor.x,
+                                y: point.y - monitor.y,
+                                monitor_width: monitor.width,
+                                monitor_height: monitor.height,
+                            },
+                        );
+                    }
                 }
+            } else {
+                if let Some(previous_label) = active_label.as_deref() {
+                    let _ = app.emit_to(previous_label, "capture-hover-clear", ());
+                }
+                active_label = None;
             }
 
-            // 如果没找到，默认使用第一个屏幕
-            let screen = target_screen.unwrap_or_else(|| screens.objectAtIndex(0));
-            let frame = screen.frame();
+            std::thread::sleep(Duration::from_millis(35));
+        }
+    });
+}
 
-            let ns_window = window_handle.ns_window().unwrap() as *mut std::ffi::c_void;
-            // 转换为 *mut NSWindow 并保留它
-            let ns_window = Retained::from_raw(ns_window as *mut NSWindow).unwrap();
+#[cfg(target_os = "macos")]
+fn stop_capture_focus_follower(app: &AppHandle) {
+    use std::sync::atomic::Ordering;
 
-            // 移动窗口到目标屏幕并设置大小
-            ns_window.setFrame_display(frame, true);
+    app.state::<CaptureFocusFollowerState>()
+        .0
+        .fetch_add(1, Ordering::SeqCst);
+}
 
-            // 设置层级为 NSStatusWindowLevel (25)
-            ns_window.setLevel(25);
+#[cfg(target_os = "macos")]
+fn capture_monitor_image(monitor: &CaptureMonitor) -> Result<Vec<u8>, String> {
+    use std::fs;
+    use std::process::Command;
 
-            let behavior = ns_window.collectionBehavior();
-            ns_window.setCollectionBehavior(
-                behavior
-                    | NSWindowCollectionBehavior::CanJoinAllSpaces
-                    | NSWindowCollectionBehavior::FullScreenAuxiliary,
-            );
+    let start_time = std::time::Instant::now();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let temp_file = std::env::temp_dir().join(format!(
+        "xshot_capture_screen_{}_{}_{}.png",
+        std::process::id(),
+        monitor.id,
+        timestamp
+    ));
+    let rect = format!(
+        "{},{},{},{}",
+        monitor.x.round() as i64,
+        monitor.y.round() as i64,
+        monitor.width.round().max(1.0) as i64,
+        monitor.height.round().max(1.0) as i64
+    );
 
-            // 防止 Retained 包装器在超出作用域时释放窗口
-            // 因为 Tauri 管理窗口生命周期
-            let _ = Retained::into_raw(ns_window);
-        });
+    let output = Command::new("screencapture")
+        .arg("-x")
+        .arg("-R")
+        .arg(&rect)
+        .arg(&temp_file)
+        .output()
+        .map_err(|e| format!("Failed to execute screencapture: {}", e))?;
+
+    if !output.status.success() {
+        let _ = fs::remove_file(&temp_file);
+        return Err(format!(
+            "screencapture failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
 
-    // 对于非 macOS 系统，或者作为 macOS 的补充（如果上面的 unsafe 代码块没有覆盖所有情况）
-    // 我们仍然尝试使用 Tauri 的 API 来设置大小，但这可能不会移动窗口到正确的屏幕
-    #[cfg(not(target_os = "macos"))]
-    if let Ok(Some(monitor)) = window.current_monitor() {
-        let size = monitor.size();
-        let position = monitor.position();
-        let _ = window.set_position(*position);
-        let _ = window.set_size(*size);
+    let bytes = fs::read(&temp_file).map_err(|e| format!("Failed to read capture file: {}", e))?;
+    let _ = fs::remove_file(temp_file);
+
+    println!(
+        "Capture screen {} rect {} finished in {:?}",
+        monitor.label,
+        rect,
+        start_time.elapsed()
+    );
+    Ok(bytes)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn capture_monitor_image(monitor: &CaptureMonitor) -> Result<Vec<u8>, String> {
+    let start_time = std::time::Instant::now();
+    let target_monitor = Monitor::all()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|candidate| candidate.id().ok() == Some(monitor.id))
+        .ok_or("No monitor found")?;
+    let image = target_monitor.capture_image().map_err(|e| e.to_string())?;
+    let mut bytes: Vec<u8> = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new_with_quality(
+        &mut bytes,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::Paeth,
+    );
+
+    encoder
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ColorType::Rgba8.into(),
+        )
+        .map_err(|e| e.to_string())?;
+
+    println!(
+        "Capture screen {} finished in {:?}",
+        monitor.label,
+        start_time.elapsed()
+    );
+    Ok(bytes)
+}
+
+#[tauri::command]
+async fn ensure_screenshot_window(app: AppHandle) -> Result<(), String> {
+    let monitors = capture_monitors()?;
+    if monitors.is_empty() {
+        return Err("No monitor found".into());
     }
+
+    let active_labels = monitors
+        .iter()
+        .map(|monitor| monitor.label.clone())
+        .collect::<HashSet<_>>();
+
+    for (label, window) in screenshot_windows(&app) {
+        if !active_labels.contains(&label) {
+            let _ = window.hide();
+        }
+    }
+
+    for monitor in monitors {
+        let window = if let Some(window) = app.get_webview_window(&monitor.label) {
+            window
+        } else {
+            println!("Creating screenshot window {}...", monitor.label);
+            WebviewWindowBuilder::new(&app, &monitor.label, WebviewUrl::App("/screenshot".into()))
+                .title("Screenshot")
+                .visible(false)
+                .decorations(false)
+                .resizable(false)
+                .minimizable(false)
+                .maximizable(false)
+                .always_on_top(true)
+                .visible_on_all_workspaces(true)
+                .skip_taskbar(true)
+                .transparent(true)
+                .position(monitor.x, monitor.y)
+                .inner_size(monitor.width, monitor.height)
+                .build()
+                .map_err(|e| e.to_string())?
+        };
+
+        configure_screenshot_window(&app, &window, &monitor)?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn start_capture(app: AppHandle) -> Result<(), String> {
+    ensure_screenshot_window(app.clone()).await?;
+    #[cfg(target_os = "macos")]
+    let _ = stop_long_capture_scroll_monitor(app.clone()).await;
+    #[cfg(target_os = "macos")]
+    let _ = set_screenshot_window_ignores_mouse_events(&app, None, false);
+
+    hide_screenshot_windows(&app)?;
+    let monitors = capture_monitors()?;
+    let mut prepared = HashMap::new();
+    for monitor in &monitors {
+        prepared.insert(monitor.label.clone(), capture_monitor_image(monitor)?);
+    }
+
+    {
+        let store = app.state::<PreparedCaptureStore>();
+        *store
+            .0
+            .lock()
+            .map_err(|_| "Failed to lock prepared capture store".to_string())? = prepared;
+    }
+
+    for monitor in &monitors {
+        app.emit("start-capture", monitor)
+            .map_err(|error| error.to_string())?;
+    }
+
+    #[cfg(target_os = "macos")]
+    start_capture_focus_follower(app, monitors);
 
     Ok(())
 }
@@ -196,14 +527,18 @@ async fn ensure_screenshot_window(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn finish_capture(app: AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
+    stop_capture_focus_follower(&app);
+    #[cfg(target_os = "macos")]
     let _ = stop_long_capture_scroll_monitor(app.clone()).await;
     #[cfg(target_os = "macos")]
-    let _ = set_screenshot_window_ignores_mouse_events(&app, false);
+    let _ = set_screenshot_window_ignores_mouse_events(&app, None, false);
 
-    if let Some(window) = app.get_webview_window("screenshot_window") {
-        window.hide().map_err(|e| e.to_string())?;
+    {
+        let store = app.state::<PreparedCaptureStore>();
+        let _ = store.0.lock().map(|mut captures| captures.clear());
     }
-    Ok(())
+
+    hide_screenshot_windows(&app)
 }
 
 fn show_main_window(app: &AppHandle) {
@@ -250,8 +585,30 @@ async fn set_dock_icon_visible(app: AppHandle, visible: bool) -> Result<(), Stri
 }
 
 #[tauri::command]
-async fn capture_fullscreen(_app: AppHandle) -> Result<tauri::ipc::Response, String> {
+async fn capture_fullscreen(
+    app: AppHandle,
+    window_label: Option<String>,
+) -> Result<tauri::ipc::Response, String> {
     let start_time = std::time::Instant::now();
+    if let Some(label) = window_label.as_deref() {
+        let prepared = {
+            let store = app.state::<PreparedCaptureStore>();
+            let mut captures = store
+                .0
+                .lock()
+                .map_err(|_| "Failed to lock prepared capture store".to_string())?;
+            captures.remove(label)
+        };
+        if let Some(bytes) = prepared {
+            println!(
+                "Prepared capture {} consumed in {:?}",
+                label,
+                start_time.elapsed()
+            );
+            return Ok(tauri::ipc::Response::new(bytes));
+        }
+    }
+
     #[cfg(target_os = "macos")]
     {
         use std::fs;
@@ -266,8 +623,11 @@ async fn capture_fullscreen(_app: AppHandle) -> Result<tauri::ipc::Response, Str
             std::process::id(),
             timestamp
         ));
-        let screenshot_window = _app
-            .get_webview_window("screenshot_window")
+        let fallback_label = first_screenshot_window_label(&app)
+            .unwrap_or_else(|| SCREENSHOT_WINDOW_PREFIX.to_string());
+        let target_label = window_label.unwrap_or(fallback_label);
+        let screenshot_window = app
+            .get_webview_window(&target_label)
             .ok_or("Screenshot window not found")?;
         let scale_factor = screenshot_window
             .scale_factor()
@@ -310,7 +670,8 @@ async fn capture_fullscreen(_app: AppHandle) -> Result<tauri::ipc::Response, Str
         let _ = fs::remove_file(temp_file);
 
         println!(
-            "Capture screen rect {} finished in {:?}",
+            "Capture screen {} rect {} finished in {:?}",
+            target_label,
             rect,
             start_time.elapsed()
         );
@@ -320,9 +681,17 @@ async fn capture_fullscreen(_app: AppHandle) -> Result<tauri::ipc::Response, Str
     #[cfg(not(target_os = "macos"))]
     {
         let monitors = Monitor::all().map_err(|e| e.to_string())?;
-        // 目前只捕获第一个显示器。
-        // TODO: 支持多显示器或特定显示器选择。
-        let monitor = monitors.first().ok_or("No monitor found")?;
+        let target_label = window_label
+            .or_else(|| first_screenshot_window_label(&app))
+            .unwrap_or_else(|| SCREENSHOT_WINDOW_PREFIX.to_string());
+        let monitor_id = target_label
+            .strip_prefix(&(SCREENSHOT_WINDOW_PREFIX.to_string() + "_"))
+            .and_then(|id| id.parse::<u32>().ok());
+        let monitor = monitors
+            .iter()
+            .find(|monitor| monitor_id.is_some_and(|id| monitor.id().ok() == Some(id)))
+            .or_else(|| monitors.first())
+            .ok_or("No monitor found")?;
         let image = monitor.capture_image().map_err(|e| e.to_string())?;
 
         let mut bytes: Vec<u8> = Vec::new();
@@ -419,13 +788,17 @@ async fn capture_screen_rect(
 }
 
 #[cfg(target_os = "macos")]
-fn screenshot_window_number(app: &AppHandle) -> Result<u32, String> {
+fn screenshot_window_number(app: &AppHandle, window_label: Option<&str>) -> Result<u32, String> {
     use objc2_app_kit::NSWindow;
     use std::sync::mpsc;
     use std::time::Duration;
 
+    let target_label = window_label
+        .map(ToOwned::to_owned)
+        .or_else(|| first_screenshot_window_label(app))
+        .unwrap_or_else(|| SCREENSHOT_WINDOW_PREFIX.to_string());
     let window = app
-        .get_webview_window("screenshot_window")
+        .get_webview_window(&target_label)
         .ok_or("Screenshot window not found")?;
     let (sender, receiver) = mpsc::channel();
 
@@ -520,6 +893,7 @@ fn encode_cg_image_to_png_bytes(image: &core_graphics::image::CGImage) -> Result
 #[tauri::command]
 async fn capture_screen_rect_below_screenshot_window(
     app: AppHandle,
+    window_label: Option<String>,
     x: f64,
     y: f64,
     width: f64,
@@ -538,7 +912,7 @@ async fn capture_screen_rect_below_screenshot_window(
             return Err("Invalid capture rectangle".into());
         }
 
-        let window_number = screenshot_window_number(&app)?;
+        let window_number = screenshot_window_number(&app, window_label.as_deref())?;
         let rect = CGRect::new(
             &CGPoint::new(x.round(), y.round()),
             &CGSize::new(width.round().max(1.0), height.round().max(1.0)),
@@ -566,29 +940,27 @@ async fn capture_screen_rect_below_screenshot_window(
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, x, y, width, height);
+        let _ = (app, window_label, x, y, width, height);
         Err("Below-window rectangle capture is only implemented on macOS".into())
     }
 }
 
 #[tauri::command]
-async fn list_capture_windows() -> Result<Vec<CaptureWindowRegion>, String> {
-    let monitors = Monitor::all().map_err(|e| e.to_string())?;
-
-    #[cfg(target_os = "macos")]
-    let target_monitor = monitors
-        .iter()
-        .find(|monitor| monitor.is_primary().unwrap_or(false))
+async fn list_capture_windows(
+    window_label: Option<String>,
+) -> Result<Vec<CaptureWindowRegion>, String> {
+    let monitors = capture_monitors()?;
+    let target_monitor = window_label
+        .as_deref()
+        .and_then(|label| monitors.iter().find(|monitor| monitor.label == label))
+        .or_else(|| monitors.iter().find(|monitor| monitor.is_primary))
         .or_else(|| monitors.first())
         .ok_or("No monitor found")?;
 
-    #[cfg(not(target_os = "macos"))]
-    let target_monitor = monitors.first().ok_or("No monitor found")?;
-
-    let monitor_x = target_monitor.x().map_err(|e| e.to_string())?;
-    let monitor_y = target_monitor.y().map_err(|e| e.to_string())?;
-    let monitor_width = target_monitor.width().map_err(|e| e.to_string())? as i32;
-    let monitor_height = target_monitor.height().map_err(|e| e.to_string())? as i32;
+    let monitor_x = target_monitor.x.round() as i32;
+    let monitor_y = target_monitor.y.round() as i32;
+    let monitor_width = target_monitor.width.round().max(1.0) as i32;
+    let monitor_height = target_monitor.height.round().max(1.0) as i32;
     let monitor_right = monitor_x + monitor_width;
     let monitor_bottom = monitor_y + monitor_height;
     let current_pid = std::process::id();
@@ -756,13 +1128,17 @@ fn compute_pin_window_size(
     app: &AppHandle,
     image_width: f64,
     image_height: f64,
+    source_window_label: Option<&str>,
 ) -> (f64, f64, f64, f64) {
     let fallback_width = 720.0;
     let fallback_height = 480.0;
     let safe_width = image_width.max(1.0);
     let safe_height = image_height.max(1.0);
-    let monitor = app
-        .get_webview_window("screenshot_window")
+    let monitor = source_window_label
+        .and_then(|label| app.get_webview_window(label))
+        .or_else(|| {
+            first_screenshot_window_label(app).and_then(|label| app.get_webview_window(&label))
+        })
         .and_then(|window| window.current_monitor().ok().flatten())
         .or_else(|| app.primary_monitor().ok().flatten());
 
@@ -813,7 +1189,11 @@ fn cleanup_pin_payload(app: &AppHandle, label: &str) {
 }
 
 #[tauri::command]
-async fn show_pin_window(app: AppHandle, blob_data: Vec<u8>) -> Result<(), String> {
+async fn show_pin_window(
+    app: AppHandle,
+    blob_data: Vec<u8>,
+    window_label: Option<String>,
+) -> Result<(), String> {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -833,7 +1213,7 @@ async fn show_pin_window(app: AppHandle, blob_data: Vec<u8>) -> Result<(), Strin
         .map_err(|e| format!("Failed to write pinned image: {}", e))?;
 
     let (initial_width, initial_height, x, y) =
-        compute_pin_window_size(&app, image_width, image_height);
+        compute_pin_window_size(&app, image_width, image_height, window_label.as_deref());
     let payload = PinWindowPayload {
         image_path: image_path.to_string_lossy().to_string(),
         image_width,
@@ -1032,27 +1412,41 @@ fn macos_request_screen_recording_access() -> bool {
 #[cfg(target_os = "macos")]
 fn set_screenshot_window_ignores_mouse_events(
     app: &AppHandle,
+    window_label: Option<&str>,
     ignores_mouse_events: bool,
 ) -> Result<(), String> {
     use objc2_app_kit::NSWindow;
     use std::sync::mpsc;
     use std::time::Duration;
 
-    let window = app
-        .get_webview_window("screenshot_window")
-        .ok_or("Screenshot window not found")?;
+    let windows = if let Some(label) = window_label {
+        vec![app
+            .get_webview_window(label)
+            .ok_or("Screenshot window not found")?]
+    } else {
+        screenshot_windows(app)
+            .into_iter()
+            .map(|(_, window)| window)
+            .collect::<Vec<_>>()
+    };
+
     let (sender, receiver) = mpsc::channel();
 
     app.run_on_main_thread(move || {
-        let result = unsafe {
-            match window.ns_window() {
-                Ok(ns_window) => {
-                    let ns_window = &*(ns_window as *mut NSWindow);
-                    ns_window.setIgnoresMouseEvents(ignores_mouse_events);
-                    Ok(())
+        let result: Result<(), String> = unsafe {
+            for window in windows {
+                match window.ns_window() {
+                    Ok(ns_window) => {
+                        let ns_window = &*(ns_window as *mut NSWindow);
+                        ns_window.setIgnoresMouseEvents(ignores_mouse_events);
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Err(error.to_string()));
+                        return;
+                    }
                 }
-                Err(error) => Err(error.to_string()),
             }
+            Ok(())
         };
         let _ = sender.send(result);
     })
@@ -1172,7 +1566,7 @@ async fn post_scroll_wheel(
         }
 
         CGEventSetLocation(event, CGPoint { x, y });
-        if let Err(error) = set_screenshot_window_ignores_mouse_events(&app, true) {
+        if let Err(error) = set_screenshot_window_ignores_mouse_events(&app, None, true) {
             CFRelease(event);
             if !source.is_null() {
                 CFRelease(source);
@@ -1190,7 +1584,7 @@ async fn post_scroll_wheel(
         let reset_app = app.clone();
         tauri::async_runtime::spawn(async move {
             std::thread::sleep(std::time::Duration::from_millis(90));
-            let _ = set_screenshot_window_ignores_mouse_events(&reset_app, false);
+            let _ = set_screenshot_window_ignores_mouse_events(&reset_app, None, false);
         });
 
         Ok(())
@@ -1206,16 +1600,18 @@ async fn post_scroll_wheel(
 #[tauri::command]
 async fn passthrough_screenshot_mouse_events(
     app: AppHandle,
+    window_label: Option<String>,
     duration_ms: u64,
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let duration_ms = duration_ms.clamp(120, 2_500);
-        set_screenshot_window_ignores_mouse_events(&app, true)?;
+        set_screenshot_window_ignores_mouse_events(&app, window_label.as_deref(), true)?;
 
         tauri::async_runtime::spawn(async move {
             std::thread::sleep(std::time::Duration::from_millis(duration_ms));
-            let _ = set_screenshot_window_ignores_mouse_events(&app, false);
+            let _ =
+                set_screenshot_window_ignores_mouse_events(&app, window_label.as_deref(), false);
         });
 
         Ok(())
@@ -1223,27 +1619,34 @@ async fn passthrough_screenshot_mouse_events(
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, duration_ms);
+        let _ = (app, window_label, duration_ms);
         Err("Mouse passthrough is only implemented on macOS".into())
     }
 }
 
 #[tauri::command]
-async fn set_screenshot_mouse_passthrough(app: AppHandle, enabled: bool) -> Result<(), String> {
+async fn set_screenshot_mouse_passthrough(
+    app: AppHandle,
+    window_label: Option<String>,
+    enabled: bool,
+) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        set_screenshot_window_ignores_mouse_events(&app, enabled)
+        set_screenshot_window_ignores_mouse_events(&app, window_label.as_deref(), enabled)
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, enabled);
+        let _ = (app, window_label, enabled);
         Ok(())
     }
 }
 
 #[tauri::command]
-async fn start_long_capture_scroll_monitor(app: AppHandle) -> Result<(), String> {
+async fn start_long_capture_scroll_monitor(
+    app: AppHandle,
+    window_label: Option<String>,
+) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
@@ -1254,8 +1657,13 @@ async fn start_long_capture_scroll_monitor(app: AppHandle) -> Result<(), String>
         use std::sync::mpsc;
         use std::time::Duration;
 
+        stop_capture_focus_follower(&app);
+
         let (sender, receiver) = mpsc::channel();
         let emit_app = app.clone();
+        let target_label = window_label
+            .or_else(|| first_screenshot_window_label(&app))
+            .unwrap_or_else(|| SCREENSHOT_WINDOW_PREFIX.to_string());
 
         app.run_on_main_thread(move || {
             let result = LONG_CAPTURE_SCROLL_TAP.with(|tap_cell| -> Result<(), String> {
@@ -1264,6 +1672,7 @@ async fn start_long_capture_scroll_monitor(app: AppHandle) -> Result<(), String>
                 }
 
                 let callback_app = emit_app.clone();
+                let callback_label = target_label.clone();
                 let tap = CGEventTap::new(
                     CGEventTapLocation::Session,
                     CGEventTapPlacement::HeadInsertEventTap,
@@ -1302,7 +1711,7 @@ async fn start_long_capture_scroll_monitor(app: AppHandle) -> Result<(), String>
                             }
 
                             let _ = callback_app.emit_to(
-                                "screenshot_window",
+                                &callback_label,
                                 "long-capture-scroll",
                                 LongCaptureScrollEvent {
                                     x: location.x,
@@ -1342,7 +1751,7 @@ async fn start_long_capture_scroll_monitor(app: AppHandle) -> Result<(), String>
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = app;
+        let _ = (app, window_label);
         Ok(())
     }
 }
@@ -1392,6 +1801,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             greet,
+            start_capture,
             capture_fullscreen,
             capture_screen_rect,
             capture_screen_rect_below_screenshot_window,
@@ -1421,6 +1831,9 @@ pub fn run() {
         .setup(|app| {
             let _ = std::fs::remove_dir_all(pin_window_temp_dir());
             app.manage(PinWindowStore::default());
+            app.manage(PreparedCaptureStore::default());
+            #[cfg(target_os = "macos")]
+            app.manage(CaptureFocusFollowerState::default());
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -1440,11 +1853,7 @@ pub fn run() {
                     "capture" => {
                         let app = app.clone();
                         tauri::async_runtime::spawn(async move {
-                            if let Err(error) = ensure_screenshot_window(app.clone()).await {
-                                eprintln!("Failed to prepare screenshot window: {}", error);
-                                return;
-                            }
-                            if let Err(error) = app.emit("start-capture", ()) {
+                            if let Err(error) = start_capture(app).await {
                                 eprintln!("Failed to start capture: {}", error);
                             }
                         });
