@@ -18,32 +18,26 @@ xshot is a desktop screenshot tool for quick capture, window/region selection, a
 
 ## Core Features
 
-- [x] Supports scrolling capture.
-- [x] Supports pinning capture results as always-on-top floating windows.
-- [x] Supports annotation tools: number marker, arrow, rectangle, line, text, pen, eraser, and mosaic area.
-- [x] Supports window hover detection: move over a candidate window and click to select it.
+- ✅ Supports scrolling capture.
+- ✅ Supports pinning capture results as always-on-top floating windows.
+- ✅ Supports annotation tools: number marker, arrow, rectangle, line, text, pen, eraser, and mosaic area.
+- ✅ Supports window hover detection: move over a candidate window and click to select it.
 
 ## Usage
 
 After launch, xshot runs from the tray. You can start a capture by:
 
 - Pressing the default shortcut `Option + X` / `Alt + X`.
-- Clicking the `Capture` button in the main window.
-- Choosing `Capture` from the tray menu.
 
-During capture:
+## Platform Notes
 
-- Move over a window and click the highlighted candidate to select that window.
-- Drag anywhere to create a custom region.
-- After the region is ready, the toolbar appears near the selection.
-- Click an annotation tool, then click an empty area inside the selection to create an annotation; clicking an existing annotation selects it first.
-- Click the scrolling capture button to show the floating preview panel beside the selection. Scroll downward inside the selection; after scrolling settles, xshot samples and stitches automatically. Reverse and horizontal scrolling are ignored to avoid corrupting the stitch.
-- The scrolling capture panel only shows live preview and shortcuts: `Enter` renders the long screenshot, `Esc` cancels.
-- After rendering, the long screenshot returns to the editor. Resize the selection handles to crop it; copy and download export the current crop.
-- The pin button pins the current capture/crop to the screen. The pinned window can be dragged, zoomed with the wheel, and right-clicked to copy, save, or close.
-- `Enter` or the confirm button copies the current capture/crop to the clipboard.
-- The download button saves a PNG.
-- `Esc` or the close button cancels the capture.
+- If macOS says the developer cannot be verified, open `System Settings` -> `Privacy & Security` and choose `Open Anyway`.
+- If the app still cannot be opened, run `xattr -dr com.apple.quarantine /Applications/xshot.app` and try again.
+- On macOS, the first capture may require Screen Recording permission; restart the app after granting it.
+- On macOS, scrolling capture requires Accessibility permission to monitor/filter wheel events and let the window under the selection receive scrolling.
+- Dock icon visibility is macOS-only.
+- The current capture path targets the primary display. Multi-monitor support is still being improved.
+- Window hover detection depends on system window enumeration, so some system windows, overlays, or fullscreen apps may behave differently.
 
 ## Settings
 
@@ -54,14 +48,6 @@ During capture:
 - Default save location: downloaded screenshots are saved here first; otherwise Downloads is used.
 - Language: Simplified Chinese and English.
 - Permissions: on macOS, view Screen Recording and Accessibility authorization status and open the matching System Settings pane.
-
-## Platform Notes
-
-- On macOS, the first capture may require Screen Recording permission; restart the app after granting it.
-- On macOS, scrolling capture requires Accessibility permission to monitor/filter wheel events and let the window under the selection receive scrolling.
-- Dock icon visibility is macOS-only.
-- The current capture path targets the primary display. Multi-monitor support is still being improved.
-- Window hover detection depends on system window enumeration, so some system windows, overlays, or fullscreen apps may behave differently.
 
 ## Current Capture Pipeline
 
