@@ -7,7 +7,9 @@ import {
   AppWindowMac,
   Check,
   Crosshair,
+  Eye,
   ExternalLink,
+  Fingerprint,
   FolderOpen,
   Keyboard,
   Languages,
@@ -15,6 +17,7 @@ import {
   Power,
   RefreshCw,
   RotateCcw,
+  Search,
   Settings2,
   ShieldCheck,
   X,
@@ -29,10 +32,16 @@ import {
 import {
   getSettings,
   SUPPORTED_LANGUAGES,
+  VISIBLE_WATERMARK_PLACEMENTS,
+  WATERMARK_OPACITY_MAX,
+  WATERMARK_OPACITY_MIN,
+  WATERMARK_TEXT_MAX_LENGTH,
   updateSettings,
   type AppSettings,
   type AppLanguage,
+  type VisibleWatermarkPlacement,
 } from "./logic/settings";
+import { decodeHiddenWatermarkFromFile } from "./logic/watermark";
 import PinWindow from "./windows/Pin";
 import ScreenshotWindow from "./windows/Screenshot";
 import "./App.css";
@@ -48,6 +57,18 @@ const MODIFIER_KEYS = new Set([
   "Super",
 ]);
 
+const VISIBLE_WATERMARK_PLACEMENT_LABEL_KEYS: Record<
+  VisibleWatermarkPlacement,
+  string
+> = {
+  "repeat-diagonal": "settings.watermark.repeatDiagonal",
+  "repeat-horizontal": "settings.watermark.repeatHorizontal",
+  "top-left": "settings.watermark.topLeft",
+  "top-right": "settings.watermark.topRight",
+  "bottom-left": "settings.watermark.bottomLeft",
+  "bottom-right": "settings.watermark.bottomRight",
+};
+
 type MacosPermissionKind = "accessibility" | "screenRecording";
 
 type MacosPermissionStatus = {
@@ -55,6 +76,16 @@ type MacosPermissionStatus = {
   accessibility: boolean;
   eventPosting: boolean;
   screenRecording: boolean;
+};
+type HiddenWatermarkDetectionStatus =
+  | "idle"
+  | "detecting"
+  | "detected"
+  | "empty"
+  | "failed";
+type HiddenWatermarkDetectionState = {
+  status: HiddenWatermarkDetectionStatus;
+  message: string;
 };
 
 function normalizeKey(key: string) {
@@ -174,13 +205,52 @@ function App() {
   const [isEditingShortcut, setIsEditingShortcut] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [status, setStatus] = useState("");
+  const [hiddenWatermarkDetection, setHiddenWatermarkDetection] =
+    useState<HiddenWatermarkDetectionState>({
+      status: "idle",
+      message: "",
+    });
+  const [
+    isHiddenWatermarkDetectionOverflowing,
+    setIsHiddenWatermarkDetectionOverflowing,
+  ] = useState(false);
   const shortcutInputRef = useRef<HTMLInputElement>(null);
+  const hiddenWatermarkInputRef = useRef<HTMLInputElement>(null);
+  const hiddenWatermarkDetectionResultRef = useRef<HTMLSpanElement>(null);
   const isMac = useMemo(
     () => navigator.platform.toLowerCase().includes("mac"),
     []
   );
   const saveDirectoryLabel =
     settings.defaultSaveDirectory || t("settings.defaultSaveDirectoryEmpty");
+  const hiddenWatermarkDetectionLabel =
+    hiddenWatermarkDetection.message || t("settings.watermark.detectHint");
+
+  useEffect(() => {
+    const element = hiddenWatermarkDetectionResultRef.current;
+    if (!element) return;
+
+    const updateOverflowState = () => {
+      const isOverflowing = element.scrollWidth > element.clientWidth;
+      setIsHiddenWatermarkDetectionOverflowing((current) =>
+        current === isOverflowing ? current : isOverflowing
+      );
+    };
+
+    updateOverflowState();
+
+    const resizeObserver =
+      typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(updateOverflowState)
+        : null;
+    resizeObserver?.observe(element);
+    window.addEventListener("resize", updateOverflowState);
+
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", updateOverflowState);
+    };
+  }, [hiddenWatermarkDetectionLabel]);
 
   const refreshPermissions = useCallback(async () => {
     if (!isMac) {
@@ -346,6 +416,65 @@ function App() {
     applySettings({ language });
     await i18n.changeLanguage(language);
     setStatus(i18n.t("settings.status.updated"));
+  };
+
+  const updateVisibleWatermark = (
+    patch: Partial<AppSettings["visibleWatermark"]>
+  ) => {
+    applySettings({
+      visibleWatermark: {
+        ...settings.visibleWatermark,
+        ...patch,
+      },
+    });
+    setStatus(t("settings.status.updated"));
+  };
+
+  const updateHiddenWatermark = (
+    patch: Partial<AppSettings["hiddenWatermark"]>
+  ) => {
+    applySettings({
+      hiddenWatermark: {
+        ...settings.hiddenWatermark,
+        ...patch,
+      },
+    });
+    setStatus(t("settings.status.updated"));
+  };
+
+  const handleHiddenWatermarkFileChange = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+
+    setHiddenWatermarkDetection({
+      status: "detecting",
+      message: t("settings.watermark.detecting"),
+    });
+    try {
+      const decoded = await decodeHiddenWatermarkFromFile(file);
+      setHiddenWatermarkDetection(
+        decoded
+          ? {
+              status: "detected",
+              message: t("settings.watermark.detected", {
+                text: decoded.text,
+              }),
+            }
+          : {
+              status: "empty",
+              message: t("settings.watermark.notDetected"),
+            }
+      );
+    } catch (error) {
+      console.warn("Failed to detect hidden watermark:", error);
+      setHiddenWatermarkDetection({
+        status: "failed",
+        message: t("settings.watermark.detectFailed"),
+      });
+    }
   };
 
   const permissionRows = [
@@ -607,6 +736,165 @@ function App() {
                 />
                 <span />
               </label>
+            </div>
+
+            <div className="settings-row stacked watermark-row">
+              <div className="settings-row-main watermark-row-main">
+                <div className="settings-row-icon">
+                  <Eye size={17} />
+                </div>
+                <div className="settings-row-copy">
+                  <div className="settings-row-title">
+                    {t("settings.watermark.visible")}
+                  </div>
+                  <p>{t("settings.watermark.visibleHint")}</p>
+                </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={settings.visibleWatermark.enabled}
+                    aria-label={t("settings.watermark.visible")}
+                    onChange={(event) =>
+                      updateVisibleWatermark({
+                        enabled: event.currentTarget.checked,
+                      })
+                    }
+                  />
+                  <span />
+                </label>
+              </div>
+              <div className="watermark-controls">
+                <input
+                  className="settings-text-input"
+                  type="text"
+                  value={settings.visibleWatermark.text}
+                  maxLength={WATERMARK_TEXT_MAX_LENGTH}
+                  disabled={!settings.visibleWatermark.enabled}
+                  aria-label={t("settings.watermark.visibleText")}
+                  placeholder={t("settings.watermark.textPlaceholder")}
+                  onChange={(event) =>
+                    updateVisibleWatermark({ text: event.currentTarget.value })
+                  }
+                />
+                <div className="watermark-options">
+                  <div className="select-wrap watermark-select">
+                    <Settings2 size={15} />
+                    <select
+                      value={settings.visibleWatermark.placement}
+                      disabled={!settings.visibleWatermark.enabled}
+                      aria-label={t("settings.watermark.placement")}
+                      onChange={(event) =>
+                        updateVisibleWatermark({
+                          placement: event.currentTarget
+                            .value as VisibleWatermarkPlacement,
+                        })
+                      }
+                    >
+                      {VISIBLE_WATERMARK_PLACEMENTS.map((placement) => (
+                        <option key={placement} value={placement}>
+                          {t(VISIBLE_WATERMARK_PLACEMENT_LABEL_KEYS[placement])}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <label className="opacity-control">
+                    <span>{t("settings.watermark.opacity")}</span>
+                    <input
+                      type="range"
+                      min={WATERMARK_OPACITY_MIN}
+                      max={WATERMARK_OPACITY_MAX}
+                      step="0.01"
+                      value={settings.visibleWatermark.opacity}
+                      disabled={!settings.visibleWatermark.enabled}
+                      aria-label={t("settings.watermark.opacity")}
+                      onChange={(event) =>
+                        updateVisibleWatermark({
+                          opacity: Number(event.currentTarget.value),
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <div className="settings-row stacked watermark-row">
+              <div className="settings-row-main watermark-row-main">
+                <div className="settings-row-icon">
+                  <Fingerprint size={17} />
+                </div>
+                <div className="settings-row-copy">
+                  <div className="settings-row-title">
+                    {t("settings.watermark.hidden")}
+                  </div>
+                  <p>{t("settings.watermark.hiddenHint")}</p>
+                </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={settings.hiddenWatermark.enabled}
+                    aria-label={t("settings.watermark.hidden")}
+                    onChange={(event) =>
+                      updateHiddenWatermark({
+                        enabled: event.currentTarget.checked,
+                      })
+                    }
+                  />
+                  <span />
+                </label>
+              </div>
+              <div className="watermark-controls">
+                <input
+                  className="settings-text-input"
+                  type="text"
+                  value={settings.hiddenWatermark.text}
+                  maxLength={WATERMARK_TEXT_MAX_LENGTH}
+                  disabled={!settings.hiddenWatermark.enabled}
+                  aria-label={t("settings.watermark.hiddenText")}
+                  placeholder={t("settings.watermark.textPlaceholder")}
+                  onChange={(event) =>
+                    updateHiddenWatermark({ text: event.currentTarget.value })
+                  }
+                />
+                <div className="watermark-detect-row">
+                  <button
+                    className="inline-action-button"
+                    type="button"
+                    onClick={() => hiddenWatermarkInputRef.current?.click()}
+                  >
+                    <Search size={15} />
+                    <span>{t("settings.watermark.detect")}</span>
+                  </button>
+                  <span
+                    ref={hiddenWatermarkDetectionResultRef}
+                    className={[
+                      "watermark-detection-result",
+                      hiddenWatermarkDetection.status !== "idle"
+                        ? `is-${hiddenWatermarkDetection.status}`
+                        : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    title={
+                      isHiddenWatermarkDetectionOverflowing
+                        ? hiddenWatermarkDetectionLabel
+                        : undefined
+                    }
+                    aria-live="polite"
+                  >
+                    {hiddenWatermarkDetectionLabel}
+                  </span>
+                  <input
+                    ref={hiddenWatermarkInputRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    hidden
+                    onChange={(event) =>
+                      void handleHiddenWatermarkFileChange(event)
+                    }
+                  />
+                </div>
+              </div>
             </div>
 
             <div className="settings-row stacked">

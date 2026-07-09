@@ -34,6 +34,7 @@ Le README en chinois simplifié est la source de référence de la documentation
 - ✅ Prend en charge l'OCR, la reconnaissance de QR codes, la traduction de texte et la superposition de traduction sur le texte d'origine.
 - ✅ Prend en charge les outils d'annotation : marqueur numéroté, flèche, rectangle, ligne, texte, stylo, gomme et mosaïque par zone.
 - ✅ Prend en charge la détection de fenêtre au survol : déplacez le curseur sur une fenêtre candidate et cliquez pour la sélectionner.
+- ✅ Prend en charge les filigranes visibles et cachés : les captures exportées peuvent ajouter un texte transparent ou intégrer un filigrane détectable dans le domaine fréquentiel.
 
 ![screenshot/xshot.jpeg](./screenshot/xshot.jpeg)
 
@@ -61,6 +62,8 @@ Après son lancement, xshot fonctionne depuis la barre d'état système. Vous po
 - Icône du Dock : sous macOS, contrôle l'affichage de l'icône de l'application dans le Dock.
 - Lancer à l'ouverture de session : démarre automatiquement xshot après la connexion.
 - Emplacement d'enregistrement par défaut : les captures téléchargées sont d'abord enregistrées dans le dossier indiqué ; sinon, le dossier Downloads est utilisé.
+- Filigrane visible : ajoute un texte transparent personnalisé lors de la copie, du téléchargement ou de l'épinglage d'une capture ; prend en charge les coins, le pavage horizontal et le pavage diagonal.
+- Filigrane caché : intègre un texte personnalisé lors de la copie, du téléchargement ou de l'épinglage d'une capture. La page Réglages peut détecter un filigrane caché depuis une image ; si le résultat est long, le texte complet n'apparaît au survol que lorsqu'il est tronqué.
 - Langue de l'interface : prend actuellement en charge le chinois simplifié et English.
 - Permissions : sous macOS, affiche l'état des autorisations d'enregistrement de l'écran et d'accessibilité, et ouvre directement le panneau correspondant des Réglages Système.
 
@@ -73,6 +76,8 @@ Après son lancement, xshot fonctionne depuis la barre d'état système. Vous po
 - L'assemblage de capture longue ajoute uniquement les nouvelles lignes selon le décalage vertical réel entre deux images. Les petits déplacements ne mettent pas à jour l'image précédente, ce qui évite d'ajouter trop de contenu sur des textures répétées ou des fonds blancs.
 - Une fois l'image longue générée, elle passe dans la vue de recadrage/édition ; copier et enregistrer exportent la zone de recadrage actuelle.
 - L'épinglage écrit le PNG exporté dans un répertoire temporaire, puis crée une fenêtre Tauri indépendante, sans bordure, toujours au premier plan et visible sur tous les espaces pour afficher l'image.
+- Les filigranes ne sont appliqués qu'à l'export final et couvrent la copie, le téléchargement et l'épinglage à l'écran. OCR, reconnaissance QR et traduction utilisent toujours la sélection d'origine pour éviter toute interférence.
+- Le chemin principal du filigrane caché intègre les bits dans des paires de coefficients DCT de luminance à fréquence moyenne sur des blocs 8x8, répète l'en-tête et le corps, puis restaure les bits par vote majoritaire lors de la détection. Le payload contient magic, longueur et checksum ; l'ancien chemin LSB reste un fallback de compatibilité pour les petites images et les anciens exports.
 - L'OCR utilise `VNRecognizeTextRequest` de macOS Vision, en privilégiant accurate puis en revenant à fast en cas d'échec ; la reconnaissance QR utilise `VNDetectBarcodesRequest`.
 - La traduction est gérée par le backend Rust via Google Translate et prend en charge le proxy système. La superposition de traduction génère des annotations de texte éditables et annulables à partir des coordonnées OCR block ; un nouveau clic supprime la superposition générée.
 - Le flux de capture conserve des journaux de durée par étape afin d'identifier la latence du raccourci, de la capture, du décodage d'image et de l'affichage de la fenêtre.
@@ -107,6 +112,7 @@ Structure du projet :
 src/                    Frontend React
 src/windows/            Fenêtre de capture
 src/logic/              Réglages, raccourcis, curseur et logique frontend
+src/logic/watermark.ts  Rendu du filigrane visible, intégration et détection du filigrane caché
 src-tauri/              Backend Tauri / Rust
 src-tauri/src/lib.rs    Capture, barre d'état, presse-papiers, enregistrement des commandes de fenêtre
 src-tauri/src/ocr.rs    OCR macOS Vision / reconnaissance QR
@@ -120,6 +126,7 @@ public/                 Ressources d'images de l'application
 - La capture défilante est actuellement prioritaire sur macOS et dépend des autorisations d'enregistrement de l'écran et d'accessibilité ; elle ne prend pour l'instant en charge que l'assemblage vers le bas.
 - L'OCR est actuellement prioritaire sur macOS ; la traduction dépend du réseau et de la disponibilité de Google Translate.
 - Les modifications de propriétés d'annotation sont appliquées immédiatement, mais ne sont pas encore suivies comme actions autonomes dans la pile d'annulation.
+- Le filigrane caché sert à la traçabilité et à la détection légères, pas au DRM ni à la prévention de falsification. Le réencodage PNG/JPEG/WebP à taille identique est plus robuste que l'ancien chemin LSB, mais un redimensionnement important, un recadrage, une rotation, une forte compression, des filtres ou des captures secondaires peuvent encore empêcher la détection.
 - Les réglages avancés tels que le choix du format d'image, les paramètres de lancement et la personnalisation de la barre d'outils ne sont pas encore exposés.
 - La capture de fenêtre dépend de la détection de fenêtres candidates ; de rares fenêtres transparentes, surcouches système ou espaces plein écran peuvent ne pas être correctement ciblés.
 

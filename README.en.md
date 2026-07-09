@@ -34,6 +34,7 @@ The Simplified Chinese README is the source of truth for documentation. When fea
 - ✅ Supports OCR text recognition, QR recognition, text translation, and translation overlay.
 - ✅ Supports annotation tools: number marker, arrow, rectangle, line, text, pen, eraser, and mosaic area.
 - ✅ Supports window hover detection: move over a candidate window and click to select it.
+- ✅ Supports visible and hidden watermarks: exported captures can add transparent text or embed a detectable frequency-domain watermark.
 
 ![screenshot/xshot.jpeg](./screenshot/xshot.jpeg)
 
@@ -61,6 +62,8 @@ After launch, xshot runs from the tray. You can start a capture by:
 - Dock icon: macOS-only option for showing the app in the Dock.
 - Launch at login: start xshot automatically after sign-in.
 - Default save location: downloaded screenshots are saved here first; otherwise Downloads is used.
+- Visible watermark: adds custom transparent text when copying, downloading, or pinning a capture; supports corners, horizontal tiling, and diagonal tiling.
+- Hidden watermark: embeds custom watermark text when copying, downloading, or pinning a capture. The Settings page can detect hidden watermarks from an image; long detected text is shown in full on hover only when truncated.
 - Interface language: currently supports Simplified Chinese and English.
 - Permissions: on macOS, view Screen Recording and Accessibility authorization status and open the matching System Settings pane.
 
@@ -73,6 +76,8 @@ After launch, xshot runs from the tray. You can start a capture by:
 - Scrolling capture stitches by estimating the real vertical offset between frames and appending only the new rows. Tiny shifts do not update the previous frame, which avoids over-appending on repeated textures or blank areas.
 - After rendering, long screenshots enter the crop/edit view; copy and save export the current crop.
 - Pinning writes the current exported PNG to a temporary directory, then creates a borderless, always-on-top, all-workspaces Tauri window to display it.
+- Watermarks are applied only at final export time and cover copy, download, and pin-to-screen. OCR, QR recognition, and translation still use the original selection to avoid watermark interference.
+- The hidden watermark main path embeds bits into 8x8 DCT luminance mid-frequency coefficient pairs, repeats the header and body, and restores bits by majority vote during detection. The payload includes magic, length, and checksum; the old LSB path remains as a compatibility fallback for small images and older exports.
 - OCR uses macOS Vision `VNRecognizeTextRequest`, preferring accurate recognition and falling back to fast recognition; QR detection uses `VNDetectBarcodesRequest`.
 - Translation is handled by the Rust backend through Google Translate and supports system proxy settings. Translation overlay creates editable, undoable text annotations from OCR block coordinates; clicking the overlay tool again removes the generated overlay.
 - Capture timing logs are intentionally kept to profile shortcut handling, screen capture, image decoding, and window presentation.
@@ -107,6 +112,7 @@ Project structure:
 src/                    React frontend
 src/windows/            Screenshot window
 src/logic/              Settings, shortcuts, cursor helpers
+src/logic/watermark.ts  Visible watermark rendering, hidden watermark embedding and detection
 src-tauri/              Tauri / Rust backend
 src-tauri/src/lib.rs    Capture, tray, clipboard, command registration
 src-tauri/src/ocr.rs    macOS Vision OCR / QR recognition
@@ -120,6 +126,7 @@ public/                 Image assets
 - Scrolling capture is currently macOS-first and depends on Screen Recording and Accessibility permissions. It currently supports downward stitching only.
 - OCR is currently macOS-first; translation depends on network access and Google Translate availability.
 - Annotation property edits are applied immediately but are not yet tracked as standalone undo actions.
+- Hidden watermarking is for lightweight tracing and detection, not DRM or tamper prevention. Same-size PNG/JPEG/WebP re-encoding is more robust than the old LSB path, but heavy resizing, cropping, rotation, strong compression, filters, or secondary screenshots may still break detection.
 - Advanced settings such as image format selection, launch options, and toolbar customization are not exposed yet.
 - Window capture depends on candidate window detection; a few transparent windows, system overlays, or fullscreen spaces may not be matched accurately.
 

@@ -34,6 +34,7 @@ O README em chinês simplificado é a fonte de referência da documentação. Qu
 - ✅ Suporta OCR, reconhecimento de QR code, tradução de texto e sobreposição de tradução sobre o texto original.
 - ✅ Suporta ferramentas de anotação: marcador numerado, seta, retângulo, linha, texto, caneta, borracha e mosaico por área.
 - ✅ Suporta detecção de janela ao passar o cursor: mova sobre uma janela candidata e clique para selecioná-la.
+- ✅ Suporta marcas d'água visíveis e ocultas: capturas exportadas podem adicionar texto transparente ou incorporar uma marca detectável no domínio de frequência.
 
 ![screenshot/xshot.jpeg](./screenshot/xshot.jpeg)
 
@@ -61,6 +62,8 @@ Após iniciar, o xshot roda pela bandeja. Você pode começar uma captura assim:
 - Ícone no Dock: no macOS, controla se o ícone do app aparece no Dock.
 - Iniciar ao entrar: inicia o xshot automaticamente após o login.
 - Local padrão para salvar: screenshots baixadas são salvas primeiro na pasta definida; se não houver uma, usa Downloads.
+- Marca d'água visível: adiciona texto transparente personalizado ao copiar, baixar ou fixar uma captura; suporta cantos, repetição horizontal e repetição diagonal.
+- Marca d'água oculta: incorpora texto personalizado ao copiar, baixar ou fixar uma captura. A página de configurações pode detectar marcas ocultas a partir de uma imagem; resultados longos aparecem completos no hover apenas quando truncados.
 - Idioma da interface: atualmente suporta chinês simplificado e English.
 - Permissões: no macOS, mostra o status de gravação de tela e acessibilidade, e abre diretamente o painel correspondente dos Ajustes do Sistema.
 
@@ -73,6 +76,8 @@ Após iniciar, o xshot roda pela bandeja. Você pode começar uma captura assim:
 - A montagem da captura longa adiciona apenas novas linhas com base no deslocamento vertical real entre dois quadros. Pequenos deslocamentos não atualizam o quadro anterior, evitando adição excessiva em texturas repetidas ou fundos brancos.
 - Depois de gerada, a captura longa entra na visão de recorte/edição; copiar e salvar exportam a área de recorte atual.
 - Fixar uma captura grava o PNG exportado em um diretório temporário e cria uma janela Tauri independente, sem borda, sempre no topo e visível em todos os espaços para exibir a imagem.
+- Marcas d'água são aplicadas apenas na exportação final e cobrem copiar, baixar e fixar na tela. OCR, reconhecimento de QR e tradução continuam usando a seleção original para evitar interferência.
+- O caminho principal da marca oculta incorpora bits em pares de coeficientes DCT de luminância de frequência média em blocos 8x8, repete header e corpo e restaura bits por voto majoritário na detecção. O payload inclui magic, tamanho e checksum; o caminho LSB antigo permanece como fallback de compatibilidade para imagens pequenas e exportações antigas.
 - O OCR usa `VNRecognizeTextRequest` do macOS Vision, priorizando accurate e recorrendo a fast se falhar; o reconhecimento de QR usa `VNDetectBarcodesRequest`.
 - A tradução é feita pelo backend Rust via Google Translate e suporta proxy do sistema. A sobreposição de tradução cria anotações de texto editáveis e reversíveis a partir das coordenadas OCR block; clicar novamente remove a sobreposição gerada.
 - O fluxo de captura mantém logs de tempo por etapa para localizar latência no atalho, captura de tela, decodificação de imagem e apresentação da janela.
@@ -107,6 +112,7 @@ Estrutura do projeto:
 src/                    Frontend React
 src/windows/            Janela de screenshot
 src/logic/              Configurações, atalhos, cursor e outras lógicas frontend
+src/logic/watermark.ts  Renderização de marca visível, incorporação e detecção de marca oculta
 src-tauri/              Backend Tauri / Rust
 src-tauri/src/lib.rs    Captura, bandeja, área de transferência, registro de comandos de janela
 src-tauri/src/ocr.rs    OCR macOS Vision / reconhecimento QR
@@ -120,6 +126,7 @@ public/                 Recursos de imagem do app
 - A captura com rolagem é atualmente uma capacidade focada em macOS e depende de permissões de gravação de tela e acessibilidade; no momento só suporta montagem rolando para baixo.
 - O OCR atualmente é focado em macOS; a tradução depende de rede e da disponibilidade do Google Translate.
 - Edições de propriedades de anotação são aplicadas imediatamente, mas ainda não entram como ações independentes na pilha de desfazer.
+- A marca d'água oculta serve para rastreamento e detecção leves, não como DRM ou prevenção contra adulteração. Reencodificação PNG/JPEG/WebP no mesmo tamanho é mais robusta que o caminho LSB antigo, mas redimensionamento forte, recorte, rotação, compressão intensa, filtros ou screenshots secundários ainda podem quebrar a detecção.
 - Configurações avançadas como seleção de formato de imagem, parâmetros de inicialização e personalização da barra de ferramentas ainda não estão expostas.
 - A captura de janela depende da detecção de janelas candidatas; algumas poucas janelas transparentes, sobreposições do sistema ou espaços em tela cheia podem não ser atingidos com precisão.
 

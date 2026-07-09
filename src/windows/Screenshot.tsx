@@ -35,6 +35,7 @@ import {
 import * as fabric from "fabric";
 import { cursorManager, ToolType } from "../logic/cursor";
 import { getSettings } from "../logic/settings";
+import { applyWatermarksToBlob } from "../logic/watermark";
 
 if (typeof document !== "undefined") {
   document.documentElement.style.backgroundColor = "transparent";
@@ -2115,9 +2116,16 @@ export default function ScreenshotWindow() {
     return canvasToBlob(output);
   };
 
-  const exportSelectionBlob = async () => {
+  const exportSelectionBlob = async (
+    options: { watermarked?: boolean } = {}
+  ) => {
+    const maybeApplyWatermarks = async (blob: Blob | null) => {
+      if (!blob || !options.watermarked) return blob;
+      return applyWatermarksToBlob(blob, getSettings());
+    };
+
     if (longCaptureResultBlobRef.current) {
-      return exportLongCaptureSelectionBlob();
+      return maybeApplyWatermarks(await exportLongCaptureSelectionBlob());
     }
 
     const canvas = fabricCanvasRef.current;
@@ -2132,14 +2140,16 @@ export default function ScreenshotWindow() {
       canvas.discardActiveObject();
       canvas.requestRenderAll();
 
-      return await canvas.toBlob({
-        left: bounds.left,
-        top: bounds.top,
-        width: bounds.width,
-        height: bounds.height,
-        format: "png",
-        multiplier: 1,
-      });
+      return await maybeApplyWatermarks(
+        await canvas.toBlob({
+          left: bounds.left,
+          top: bounds.top,
+          width: bounds.width,
+          height: bounds.height,
+          format: "png",
+          multiplier: 1,
+        })
+      );
     } finally {
       selectionImg.set("strokeWidth", originalStrokeWidth);
       setSelectionHandlesVisible(true);
@@ -2771,7 +2781,7 @@ export default function ScreenshotWindow() {
   }, []);
 
   const copyToClipboard = async () => {
-    const blob = await exportSelectionBlob();
+    const blob = await exportSelectionBlob({ watermarked: true });
     if (!blob) return;
 
     const arrayBuffer = await blob.arrayBuffer();
@@ -2782,7 +2792,7 @@ export default function ScreenshotWindow() {
   };
 
   const downloadCapture = async () => {
-    const blob = await exportSelectionBlob();
+    const blob = await exportSelectionBlob({ watermarked: true });
     if (!blob) return;
 
     const arrayBuffer = await blob.arrayBuffer();
@@ -2795,7 +2805,7 @@ export default function ScreenshotWindow() {
   };
 
   const pinCapture = async () => {
-    const blob = await exportSelectionBlob();
+    const blob = await exportSelectionBlob({ watermarked: true });
     if (!blob) return;
 
     const arrayBuffer = await blob.arrayBuffer();

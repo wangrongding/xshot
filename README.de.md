@@ -34,6 +34,7 @@ Das README in vereinfachtem Chinesisch ist die maßgebliche Dokumentationsquelle
 - ✅ Unterstützt OCR-Texterkennung, QR-Code-Erkennung, Textübersetzung und Übersetzung als Overlay über dem Originaltext.
 - ✅ Unterstützt Annotationstools: Nummernmarker, Pfeil, Rechteck, Linie, Text, Stift, Radierer und Bereichsmosaik.
 - ✅ Unterstützt Fenstererkennung beim Hover: Bewege den Cursor über ein Kandidatenfenster und klicke, um es auszuwählen.
+- ✅ Unterstützt sichtbare und versteckte Wasserzeichen: exportierte Screenshots können transparenten Text hinzufügen oder ein erkennbares Frequenzbereich-Wasserzeichen einbetten.
 
 ![screenshot/xshot.jpeg](./screenshot/xshot.jpeg)
 
@@ -61,6 +62,8 @@ Nach dem Start läuft xshot in der Taskleiste. Eine Aufnahme startest du so:
 - Dock-Icon: steuert unter macOS, ob das App-Symbol im Dock angezeigt wird.
 - Beim Login starten: startet xshot automatisch nach der Anmeldung.
 - Standardspeicherort: heruntergeladene Screenshots werden bevorzugt im angegebenen Ordner gespeichert; ohne Einstellung wird Downloads verwendet.
+- Sichtbares Wasserzeichen: fügt beim Kopieren, Herunterladen oder Anheften eines Screenshots benutzerdefinierten transparenten Text hinzu; unterstützt Ecken, horizontale Kachelung und diagonale Kachelung.
+- Verstecktes Wasserzeichen: bettet beim Kopieren, Herunterladen oder Anheften benutzerdefinierten Text ein. Die Einstellungen können versteckte Wasserzeichen aus einem Bild erkennen; lange Ergebnisse werden nur bei abgeschnittenem Text per Hover vollständig angezeigt.
 - Oberflächensprache: unterstützt derzeit vereinfachtes Chinesisch und English.
 - Berechtigungen: unter macOS kannst du den Status von Bildschirmaufnahme und Bedienungshilfen prüfen und die passenden Systemeinstellungen direkt öffnen.
 
@@ -73,6 +76,8 @@ Nach dem Start läuft xshot in der Taskleiste. Eine Aufnahme startest du so:
 - Scroll-Capture fügt neue Zeilen anhand der tatsächlichen vertikalen Verschiebung zwischen zwei Frames an. Kleine Verschiebungen aktualisieren den vorherigen Frame nicht, damit wiederholte Texturen oder weiße Flächen nicht zu viel Inhalt auf einmal hinzufügen.
 - Nach der Erstellung wechselt der lange Screenshot in die Zuschneiden-/Bearbeiten-Ansicht; Kopieren und Speichern exportieren den aktuellen Zuschnitt.
 - Beim Anheften wird das aktuell exportierte PNG in ein temporäres Verzeichnis geschrieben. Anschließend zeigt ein unabhängiges, randloses, immer sichtbares und arbeitsbereichsübergreifendes Tauri-Fenster das Bild an.
+- Wasserzeichen werden nur beim finalen Export angewendet und gelten für Kopieren, Herunterladen und Anheften. OCR, QR-Erkennung und Übersetzung verwenden weiterhin die ursprüngliche Auswahl, um Störungen durch Wasserzeichen zu vermeiden.
+- Der Hauptpfad für versteckte Wasserzeichen bettet Bits in Paare von 8x8-DCT-Luminanz-Mittelfrequenzkoeffizienten ein, wiederholt Header und Body und stellt Bits bei der Erkennung per Mehrheitsentscheidung wieder her. Die Payload enthält Magic, Länge und Prüfsumme; der alte LSB-Pfad bleibt als Kompatibilitäts-Fallback für kleine Bilder und ältere Exporte erhalten.
 - OCR erkennt Text über macOS Vision `VNRecognizeTextRequest`, bevorzugt accurate und fällt bei Fehlern auf fast zurück; QR-Erkennung nutzt `VNDetectBarcodesRequest`.
 - Übersetzung wird vom Rust-Backend über Google Translate ausgeführt und unterstützt System-Proxys. Das Übersetzungs-Overlay erzeugt aus OCR block-Koordinaten editierbare und rückgängig machbare Textannotationen; ein erneuter Klick entfernt das erzeugte Overlay.
 - Der Capture-Ablauf behält segmentierte Zeitlogs bei, um Verzögerungen bei Tastenkürzel-Auslösung, Aufnahme, Bilddekodierung und Fensteranzeige zu analysieren.
@@ -107,6 +112,7 @@ Projektstruktur:
 src/                    React-Frontend
 src/windows/            Screenshot-Fenster
 src/logic/              Einstellungen, Tastenkürzel, Cursor und weitere Frontend-Logik
+src/logic/watermark.ts  Rendering sichtbarer Wasserzeichen, Einbettung und Erkennung versteckter Wasserzeichen
 src-tauri/              Tauri / Rust Backend
 src-tauri/src/lib.rs    Capture, Tray, Zwischenablage, Registrierung von Fensterbefehlen
 src-tauri/src/ocr.rs    macOS Vision OCR / QR-Erkennung
@@ -120,6 +126,7 @@ public/                 App-Bildressourcen
 - Scroll-Capture ist derzeit macOS-orientiert und hängt von Bildschirmaufnahme- und Bedienungshilfen-Berechtigungen ab; aktuell wird nur das Zusammenfügen nach unten unterstützt.
 - OCR ist derzeit macOS-orientiert; Übersetzung hängt von Netzwerkzugriff und der Verfügbarkeit von Google Translate ab.
 - Änderungen an Annotationseigenschaften werden sofort angewendet, aber noch nicht als eigene Aktionen im Undo-Stack geführt.
+- Versteckte Wasserzeichen dienen leichtgewichtiger Nachverfolgung und Erkennung, nicht als DRM oder Manipulationsschutz. Gleich große PNG/JPEG/WebP-Neukodierung ist robuster als der alte LSB-Pfad, aber starkes Skalieren, Zuschneiden, Drehen, hohe Kompression, Filter oder sekundäre Screenshots können die Erkennung weiterhin verhindern.
 - Erweiterte Einstellungen wie Bildformatwahl, Startparameter und Toolbar-Anpassung sind noch nicht verfügbar.
 - Fenster-Capture hängt von der Erkennung von Kandidatenfenstern ab; einige transparente Fenster, System-Overlays oder Vollbildbereiche werden möglicherweise nicht exakt getroffen.
 
