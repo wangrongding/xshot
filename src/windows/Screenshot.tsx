@@ -186,6 +186,7 @@ const MOSAIC_BLOCK_SIZE = 10;
 const SELECTION_HANDLE_SIZE = 9;
 const SELECTION_HANDLE_HIT_SIZE = 12;
 const SELECTION_EDGE_HIT_SIZE = 7;
+const SELECTION_BORDER_WIDTH = 2;
 const TOOLBAR_MARGIN = 10;
 const TOOLBAR_SAFE_TOP = 76;
 const DEFAULT_TOOLBAR_WIDTH = 560;
@@ -998,6 +999,7 @@ export default function ScreenshotWindow() {
   const sourceUrlRef = useRef<string | null>(null);
   const bgImgRef = useRef<fabric.FabricImage | null>(null);
   const selectionImgRef = useRef<fabric.FabricImage | null>(null);
+  const selectionBorderRef = useRef<fabric.Rect | null>(null);
   const maskRef = useRef<fabric.Rect | null>(null);
   const longCaptureFrameRef = useRef<fabric.Rect | null>(null);
   const selectionBoundsRef = useRef<Bounds | null>(null);
@@ -1381,6 +1383,8 @@ export default function ScreenshotWindow() {
     const canvas = fabricCanvasRef.current;
     if (!canvas) return;
 
+    const border = selectionBorderRef.current;
+    if (border) canvas.bringObjectToFront(border);
     RESIZE_HANDLES.forEach((handle) => {
       const object = selectionHandleRefs.current[handle];
       if (object) canvas.bringObjectToFront(object);
@@ -1391,6 +1395,39 @@ export default function ScreenshotWindow() {
     RESIZE_HANDLES.forEach((handle) => {
       selectionHandleRefs.current[handle]?.set("visible", visible);
     });
+  };
+
+  const syncSelectionBorder = (bounds: Bounds, visible = true) => {
+    const canvas = fabricCanvasRef.current;
+    if (!canvas) return;
+
+    let border = selectionBorderRef.current;
+    if (!border) {
+      border = new fabric.Rect({
+        fill: "rgba(0, 0, 0, 0)",
+        stroke: "#1677ff",
+        strokeWidth: SELECTION_BORDER_WIDTH,
+        strokeUniform: true,
+        originX: "center",
+        originY: "center",
+        selectable: false,
+        evented: false,
+        objectCaching: false,
+        visible: false,
+      });
+      selectionBorderRef.current = border;
+      canvas.add(border);
+    }
+
+    border.set({
+      left: bounds.left + bounds.width / 2,
+      top: bounds.top + bounds.height / 2,
+      width: Math.max(0, bounds.width - SELECTION_BORDER_WIDTH),
+      height: Math.max(0, bounds.height - SELECTION_BORDER_WIDTH),
+      visible,
+    });
+    border.setCoords();
+    canvas.bringObjectToFront(border);
   };
 
   const syncSelectionHandles = (bounds: Bounds) => {
@@ -1514,6 +1551,7 @@ export default function ScreenshotWindow() {
     hoverWindowRef.current = null;
     if (!selectionBoundsRef.current) {
       selectionImgRef.current?.set("visible", false);
+      selectionBorderRef.current?.set("visible", false);
       fabricCanvasRef.current?.requestRenderAll();
     }
   };
@@ -1623,6 +1661,7 @@ export default function ScreenshotWindow() {
     sourceImageRef.current = null;
     bgImgRef.current = null;
     selectionImgRef.current = null;
+    selectionBorderRef.current = null;
     maskRef.current = null;
     longCaptureFrameRef.current = null;
     selectionBoundsRef.current = null;
@@ -1944,6 +1983,7 @@ export default function ScreenshotWindow() {
       cropY,
       visible: true,
     });
+    syncSelectionBorder(bounds);
 
     if (options.commit) {
       selectionBoundsRef.current = bounds;
@@ -1968,6 +2008,7 @@ export default function ScreenshotWindow() {
     ) {
       selectionBoundsRef.current = null;
       selectionImgRef.current?.set("visible", false);
+      selectionBorderRef.current?.set("visible", false);
       setSelectionHandlesVisible(false);
       setToolbarPosition(null);
       setSelectionReady(false);
@@ -2178,12 +2219,13 @@ export default function ScreenshotWindow() {
 
     const canvas = fabricCanvasRef.current;
     const selectionImg = selectionImgRef.current;
+    const selectionBorder = selectionBorderRef.current;
     const bounds = selectionBoundsRef.current;
     if (!canvas || !selectionImg || !bounds) return null;
 
-    const originalStrokeWidth = selectionImg.strokeWidth;
+    const borderWasVisible = selectionBorder?.visible ?? false;
     try {
-      selectionImg.set("strokeWidth", 0);
+      selectionBorder?.set("visible", false);
       setSelectionHandlesVisible(false);
       canvas.discardActiveObject();
       canvas.requestRenderAll();
@@ -2199,7 +2241,7 @@ export default function ScreenshotWindow() {
         })
       );
     } finally {
-      selectionImg.set("strokeWidth", originalStrokeWidth);
+      selectionBorder?.set("visible", borderWasVisible);
       setSelectionHandlesVisible(true);
       syncSelectionHandles(bounds);
       canvas.requestRenderAll();
@@ -2368,6 +2410,7 @@ export default function ScreenshotWindow() {
     bgImgRef.current?.set("visible", false);
     maskRef.current?.set("visible", false);
     selectionImgRef.current?.set("visible", false);
+    selectionBorderRef.current?.set("visible", false);
     setSelectionHandlesVisible(false);
 
     if (longCaptureFrameRef.current) {
@@ -2512,6 +2555,8 @@ export default function ScreenshotWindow() {
 
     canvas.clear();
     bgImgRef.current = null;
+    selectionImgRef.current = null;
+    selectionBorderRef.current = null;
     maskRef.current = null;
     longCaptureFrameRef.current = null;
     selectionHandleRefs.current = {};
@@ -2572,13 +2617,12 @@ export default function ScreenshotWindow() {
       scaleY: previewScale,
       selectable: false,
       evented: false,
-      stroke: "#1677ff",
-      strokeWidth: 2 / previewScale,
     });
 
     selectionImgRef.current = preview;
     selectionBoundsRef.current = bounds;
     canvas.add(preview);
+    syncSelectionBorder(bounds);
     syncSelectionHandles(bounds);
     syncToolbarPosition(bounds);
     setSelectionReady(true);
@@ -3584,8 +3628,6 @@ export default function ScreenshotWindow() {
             selectable: false,
             evented: false,
             visible: false,
-            stroke: "#1677ff",
-            strokeWidth: 2 / scale,
           });
           selectionImgRef.current = selectionImg;
           canvas.add(selectionImg);
