@@ -80,7 +80,17 @@ struct PinWindowPayload {
 struct PinWindowStore(Mutex<HashMap<String, PinWindowPayload>>);
 
 #[derive(Default)]
-struct PreparedCaptureStore(Mutex<HashMap<String, Vec<u8>>>);
+struct PreparedCaptureStore(Mutex<HashMap<(String, String), Vec<u8>>>);
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptureStartPayload {
+    #[serde(flatten)]
+    monitor: CaptureMonitor,
+    capture_id: String,
+    source: String,
+    triggered_at_ms: f64,
+}
 
 #[cfg(target_os = "macos")]
 #[derive(Default)]
@@ -359,8 +369,67 @@ fn stop_capture_focus_follower(app: &AppHandle) {
         .fetch_add(1, Ordering::SeqCst);
 }
 
+fn unix_epoch_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64() * 1000.0)
+        .unwrap_or_default()
+}
+
+fn native_capture_id() -> String {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    format!("rust-{}-{}", unix_epoch_ms().round() as u128, sequence)
+}
+
+fn log_capture_stage(
+    capture_id: &str,
+    source: &str,
+    triggered_at_ms: f64,
+    total: std::time::Instant,
+    stage_start: std::time::Instant,
+    stage: &str,
+    extra: &str,
+) {
+    println!(
+        "[xshot][capture][rust] capture_id={} source={} stage={} stage_ms={:.1} rust_total_ms={:.1} e2e_ms={:.1}{}",
+        capture_id,
+        source,
+        stage,
+        stage_start.elapsed().as_secs_f64() * 1000.0,
+        total.elapsed().as_secs_f64() * 1000.0,
+        unix_epoch_ms() - triggered_at_ms,
+        extra,
+    );
+}
+
+fn log_capture_failure(
+    capture_id: &str,
+    source: &str,
+    triggered_at_ms: f64,
+    total: std::time::Instant,
+    stage_start: std::time::Instant,
+    stage: &str,
+    error: &str,
+) {
+    println!(
+        "[xshot][capture][rust] capture_id={} source={} stage=failed failed_stage={} stage_ms={:.1} rust_total_ms={:.1} e2e_ms={:.1} error={:?}",
+        capture_id,
+        source,
+        stage,
+        stage_start.elapsed().as_secs_f64() * 1000.0,
+        total.elapsed().as_secs_f64() * 1000.0,
+        unix_epoch_ms() - triggered_at_ms,
+        error,
+    );
+}
+
 #[cfg(target_os = "macos")]
-fn capture_monitor_image(monitor: &CaptureMonitor) -> Result<Vec<u8>, String> {
+fn capture_monitor_image(
+    monitor: &CaptureMonitor,
+    capture_id: &str,
+    source: &str,
+) -> Result<Vec<u8>, String> {
     use std::fs;
     use std::process::Command;
 
@@ -403,16 +472,23 @@ fn capture_monitor_image(monitor: &CaptureMonitor) -> Result<Vec<u8>, String> {
     let _ = fs::remove_file(temp_file);
 
     println!(
-        "Capture screen {} rect {} finished in {:?}",
+        "[xshot][capture][rust] capture_id={} source={} stage=capture_monitor_image_detail monitor={} rect={} bytes={} elapsed_ms={:.1}",
+        capture_id,
+        source,
         monitor.label,
         rect,
-        start_time.elapsed()
+        bytes.len(),
+        start_time.elapsed().as_secs_f64() * 1000.0,
     );
     Ok(bytes)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn capture_monitor_image(monitor: &CaptureMonitor) -> Result<Vec<u8>, String> {
+fn capture_monitor_image(
+    monitor: &CaptureMonitor,
+    capture_id: &str,
+    source: &str,
+) -> Result<Vec<u8>, String> {
     let start_time = std::time::Instant::now();
     let target_monitor = Monitor::all()
         .map_err(|e| e.to_string())?
@@ -437,9 +513,12 @@ fn capture_monitor_image(monitor: &CaptureMonitor) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())?;
 
     println!(
-        "Capture screen {} finished in {:?}",
+        "[xshot][capture][rust] capture_id={} source={} stage=capture_monitor_image_detail monitor={} bytes={} elapsed_ms={:.1}",
+        capture_id,
+        source,
         monitor.label,
-        start_time.elapsed()
+        bytes.len(),
+        start_time.elapsed().as_secs_f64() * 1000.0,
     );
     Ok(bytes)
 }
@@ -491,36 +570,234 @@ async fn ensure_screenshot_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn start_capture(app: AppHandle) -> Result<(), String> {
-    ensure_screenshot_window(app.clone()).await?;
-    #[cfg(target_os = "macos")]
-    let _ = stop_long_capture_scroll_monitor(app.clone()).await;
-    #[cfg(target_os = "macos")]
-    let _ = set_screenshot_window_ignores_mouse_events(&app, None, false);
+async fn start_capture(
+    app: AppHandle,
+    capture_id: Option<String>,
+    source: Option<String>,
+    triggered_at_ms: Option<f64>,
+) -> Result<(), String> {
+    let capture_id = capture_id.unwrap_or_else(native_capture_id);
+    let source = source.unwrap_or_else(|| "native".to_string());
+    let triggered_at_ms = triggered_at_ms.unwrap_or_else(unix_epoch_ms);
+    let total = std::time::Instant::now();
+    let entered = std::time::Instant::now();
+    log_capture_stage(
+        &capture_id,
+        &source,
+        triggered_at_ms,
+        total,
+        entered,
+        "rust_command_entered",
+        "",
+    );
 
-    hide_screenshot_windows(&app)?;
-    let monitors = capture_monitors()?;
+    let stage = std::time::Instant::now();
+    if let Err(error) = ensure_screenshot_window(app.clone()).await {
+        log_capture_failure(
+            &capture_id,
+            &source,
+            triggered_at_ms,
+            total,
+            stage,
+            "ensure_screenshot_window",
+            &error,
+        );
+        return Err(error);
+    }
+    log_capture_stage(
+        &capture_id,
+        &source,
+        triggered_at_ms,
+        total,
+        stage,
+        "ensure_screenshot_window",
+        "",
+    );
+
+    #[cfg(target_os = "macos")]
+    {
+        let stage = std::time::Instant::now();
+        let _ = stop_long_capture_scroll_monitor(app.clone()).await;
+        let _ = set_screenshot_window_ignores_mouse_events(&app, None, false);
+        log_capture_stage(
+            &capture_id,
+            &source,
+            triggered_at_ms,
+            total,
+            stage,
+            "stop_long_capture_and_restore_mouse",
+            "",
+        );
+    }
+
+    let stage = std::time::Instant::now();
+    if let Err(error) = hide_screenshot_windows(&app) {
+        log_capture_failure(
+            &capture_id,
+            &source,
+            triggered_at_ms,
+            total,
+            stage,
+            "hide_screenshot_windows",
+            &error,
+        );
+        return Err(error);
+    }
+    log_capture_stage(
+        &capture_id,
+        &source,
+        triggered_at_ms,
+        total,
+        stage,
+        "hide_screenshot_windows",
+        "",
+    );
+
+    let stage = std::time::Instant::now();
+    let monitors = match capture_monitors() {
+        Ok(monitors) => monitors,
+        Err(error) => {
+            log_capture_failure(
+                &capture_id,
+                &source,
+                triggered_at_ms,
+                total,
+                stage,
+                "capture_monitors",
+                &error,
+            );
+            return Err(error);
+        }
+    };
+    log_capture_stage(
+        &capture_id,
+        &source,
+        triggered_at_ms,
+        total,
+        stage,
+        "capture_monitors",
+        &format!(" count={}", monitors.len()),
+    );
+
     let mut prepared = HashMap::new();
     for monitor in &monitors {
-        prepared.insert(monitor.label.clone(), capture_monitor_image(monitor)?);
+        let stage = std::time::Instant::now();
+        let bytes = match capture_monitor_image(monitor, &capture_id, &source) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                log_capture_failure(
+                    &capture_id,
+                    &source,
+                    triggered_at_ms,
+                    total,
+                    stage,
+                    "capture_monitor_image",
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+        let size = bytes.len();
+        prepared.insert((capture_id.clone(), monitor.label.clone()), bytes);
+        log_capture_stage(
+            &capture_id,
+            &source,
+            triggered_at_ms,
+            total,
+            stage,
+            "capture_monitor_image",
+            &format!(" monitor={} bytes={}", monitor.label, size),
+        );
     }
 
+    let stage = std::time::Instant::now();
     {
         let store = app.state::<PreparedCaptureStore>();
-        *store
-            .0
-            .lock()
-            .map_err(|_| "Failed to lock prepared capture store".to_string())? = prepared;
+        let mut store = match store.0.lock() {
+            Ok(store) => store,
+            Err(_) => {
+                let error = "Failed to lock prepared capture store".to_string();
+                log_capture_failure(
+                    &capture_id,
+                    &source,
+                    triggered_at_ms,
+                    total,
+                    stage,
+                    "store_prepared_captures",
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+        store.extend(prepared);
     }
+    log_capture_stage(
+        &capture_id,
+        &source,
+        triggered_at_ms,
+        total,
+        stage,
+        "store_prepared_captures",
+        "",
+    );
 
+    let stage = std::time::Instant::now();
     for monitor in &monitors {
-        app.emit("start-capture", monitor)
-            .map_err(|error| error.to_string())?;
+        let payload = CaptureStartPayload {
+            monitor: monitor.clone(),
+            capture_id: capture_id.clone(),
+            source: source.clone(),
+            triggered_at_ms,
+        };
+        if let Err(error) = app.emit("start-capture", payload) {
+            let error = error.to_string();
+            log_capture_failure(
+                &capture_id,
+                &source,
+                triggered_at_ms,
+                total,
+                stage,
+                "emit_start_capture",
+                &error,
+            );
+            return Err(error);
+        }
     }
+    log_capture_stage(
+        &capture_id,
+        &source,
+        triggered_at_ms,
+        total,
+        stage,
+        "emit_start_capture",
+        &format!(" count={}", monitors.len()),
+    );
 
     #[cfg(target_os = "macos")]
-    start_capture_focus_follower(app, monitors);
+    {
+        let stage = std::time::Instant::now();
+        start_capture_focus_follower(app, monitors);
+        log_capture_stage(
+            &capture_id,
+            &source,
+            triggered_at_ms,
+            total,
+            stage,
+            "start_focus_follower",
+            "",
+        );
+    }
 
+    let stage = std::time::Instant::now();
+    log_capture_stage(
+        &capture_id,
+        &source,
+        triggered_at_ms,
+        total,
+        stage,
+        "rust_command_done_before_ui_ready",
+        "",
+    );
     Ok(())
 }
 
@@ -588,7 +865,11 @@ async fn set_dock_icon_visible(app: AppHandle, visible: bool) -> Result<(), Stri
 async fn capture_fullscreen(
     app: AppHandle,
     window_label: Option<String>,
+    capture_id: Option<String>,
+    source: Option<String>,
 ) -> Result<tauri::ipc::Response, String> {
+    let capture_id = capture_id.unwrap_or_else(|| "legacy".to_string());
+    let source = source.unwrap_or_else(|| "unknown".to_string());
     let start_time = std::time::Instant::now();
     if let Some(label) = window_label.as_deref() {
         let prepared = {
@@ -597,16 +878,23 @@ async fn capture_fullscreen(
                 .0
                 .lock()
                 .map_err(|_| "Failed to lock prepared capture store".to_string())?;
-            captures.remove(label)
+            captures.remove(&(capture_id.clone(), label.to_string()))
         };
         if let Some(bytes) = prepared {
             println!(
-                "Prepared capture {} consumed in {:?}",
+                "[xshot][capture][rust] capture_id={} source={} stage=capture_fullscreen_prepared_hit monitor={} bytes={} elapsed_ms={:.1}",
+                capture_id,
+                source,
                 label,
-                start_time.elapsed()
+                bytes.len(),
+                start_time.elapsed().as_secs_f64() * 1000.0,
             );
             return Ok(tauri::ipc::Response::new(bytes));
         }
+        println!(
+            "[xshot][capture][rust] capture_id={} source={} stage=capture_fullscreen_prepared_miss monitor={}",
+            capture_id, source, label
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -670,10 +958,13 @@ async fn capture_fullscreen(
         let _ = fs::remove_file(temp_file);
 
         println!(
-            "Capture screen {} rect {} finished in {:?}",
+            "[xshot][capture][rust] capture_id={} source={} stage=capture_fullscreen_fallback monitor={} rect={} bytes={} elapsed_ms={:.1}",
+            capture_id,
+            source,
             target_label,
             rect,
-            start_time.elapsed()
+            bytes.len(),
+            start_time.elapsed().as_secs_f64() * 1000.0,
         );
         return Ok(tauri::ipc::Response::new(bytes));
     }
@@ -712,7 +1003,14 @@ async fn capture_fullscreen(
             )
             .map_err(|e| e.to_string())?;
 
-        println!("Capture finished in {:?}", start_time.elapsed());
+        println!(
+            "[xshot][capture][rust] capture_id={} source={} stage=capture_fullscreen_fallback monitor={} bytes={} elapsed_ms={:.1}",
+            capture_id,
+            source,
+            target_label,
+            bytes.len(),
+            start_time.elapsed().as_secs_f64() * 1000.0,
+        );
         Ok(tauri::ipc::Response::new(bytes))
     }
 }
@@ -948,7 +1246,12 @@ async fn capture_screen_rect_below_screenshot_window(
 #[tauri::command]
 async fn list_capture_windows(
     window_label: Option<String>,
+    capture_id: Option<String>,
+    source: Option<String>,
 ) -> Result<Vec<CaptureWindowRegion>, String> {
+    let capture_id = capture_id.unwrap_or_else(|| "legacy".to_string());
+    let source = source.unwrap_or_else(|| "unknown".to_string());
+    let total = std::time::Instant::now();
     let monitors = capture_monitors()?;
     let target_monitor = window_label
         .as_deref()
@@ -976,7 +1279,15 @@ async fn list_capture_windows(
         "通知中心",
     ];
 
+    let enum_start = std::time::Instant::now();
     let windows = Window::all().map_err(|e| e.to_string())?;
+    println!(
+        "[xshot][capture][rust] capture_id={} source={} stage=list_capture_windows_enum count={} elapsed_ms={:.1}",
+        capture_id,
+        source,
+        windows.len(),
+        enum_start.elapsed().as_secs_f64() * 1000.0,
+    );
     let mut regions = Vec::new();
 
     for window in windows {
@@ -1058,7 +1369,39 @@ async fn list_capture_windows(
         });
     }
 
+    println!(
+        "[xshot][capture][rust] capture_id={} source={} stage=list_capture_windows_done monitor={} regions={} elapsed_ms={:.1}",
+        capture_id,
+        source,
+        target_monitor.label,
+        regions.len(),
+        total.elapsed().as_secs_f64() * 1000.0,
+    );
     Ok(regions)
+}
+
+#[tauri::command]
+fn record_capture_ui_timing(
+    capture_id: String,
+    source: String,
+    monitor_label: String,
+    status: String,
+    stage: String,
+    ui_total_ms: f64,
+    e2e_ms: f64,
+    error: Option<String>,
+) {
+    println!(
+        "[xshot][capture][ready] capture_id={} source={} monitor={} status={} stage={} ui_total_ms={:.1} e2e_ms={:.1} error={:?}",
+        capture_id,
+        source,
+        monitor_label,
+        status,
+        stage,
+        ui_total_ms,
+        e2e_ms,
+        error,
+    );
 }
 
 #[tauri::command]
@@ -1806,6 +2149,7 @@ pub fn run() {
             capture_screen_rect,
             capture_screen_rect_below_screenshot_window,
             list_capture_windows,
+            record_capture_ui_timing,
             copy_to_clipboard,
             copy_text_to_clipboard,
             ocr::ocr_image,
@@ -1853,7 +2197,9 @@ pub fn run() {
                     "capture" => {
                         let app = app.clone();
                         tauri::async_runtime::spawn(async move {
-                            if let Err(error) = start_capture(app).await {
+                            if let Err(error) =
+                                start_capture(app, None, Some("tray".to_string()), None).await
+                            {
                                 eprintln!("Failed to start capture: {}", error);
                             }
                         });

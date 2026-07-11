@@ -6,6 +6,7 @@ const SHORTCUT_STORAGE_KEY = "xshot.shortcut";
 
 let registeredShortcut: string | null = null;
 let registrationQueue = Promise.resolve();
+let captureSequence = 0;
 
 function readStoredShortcut() {
   if (typeof localStorage === "undefined") return DEFAULT_SHORTCUT;
@@ -21,15 +22,45 @@ export function getShortcut() {
   return readStoredShortcut();
 }
 
-export async function startCapture() {
-  await invoke("start_capture");
+function nextCaptureId() {
+  captureSequence += 1;
+  return `${Date.now().toString(36)}-${captureSequence.toString(36)}`;
+}
+
+function logCaptureTrigger(
+  captureId: string,
+  source: string,
+  startedAt: number,
+  stage: string
+) {
+  console.info(
+    `[xshot][capture][trigger] capture_id=${captureId} source=${source} stage=${stage} total_ms=${(
+      performance.now() - startedAt
+    ).toFixed(1)}`
+  );
+}
+
+export async function startCapture(
+  source = "unknown",
+  triggeredAt = performance.now()
+) {
+  const captureId = nextCaptureId();
+  const triggeredAtMs = performance.timeOrigin + triggeredAt;
+  logCaptureTrigger(captureId, source, triggeredAt, "triggered");
+  try {
+    await invoke("start_capture", { captureId, source, triggeredAtMs });
+    logCaptureTrigger(captureId, source, triggeredAt, "rust_command_done");
+  } catch (error) {
+    logCaptureTrigger(captureId, source, triggeredAt, "rust_command_failed");
+    throw error;
+  }
 }
 
 async function registerAccelerator(shortcut: string) {
   await register(shortcut, async (event) => {
     if (event.state !== "Pressed") return;
-    console.log("Shortcut triggered:", shortcut);
-    await startCapture();
+    const pressedAt = performance.now();
+    await startCapture(`shortcut:${shortcut}`, pressedAt);
   });
 }
 

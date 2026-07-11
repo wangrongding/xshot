@@ -84,6 +84,9 @@ type CaptureStartPayload = {
   scaleFactor: number;
   isPrimary: boolean;
   name: string;
+  captureId: string;
+  source: string;
+  triggeredAtMs: number;
 };
 type CaptureHoverPointPayload = {
   label: string;
@@ -302,11 +305,54 @@ function isTranslationOverlay(object: fabric.Object) {
   );
 }
 
-function logCaptureTiming(start: number, label: string) {
-  if (!import.meta.env.DEV) return;
-  console.debug(
-    `[xshot] capture ${label}: ${Math.round(performance.now() - start)}ms`
+type CaptureTimingTrace = {
+  captureId: string;
+  source: string;
+  triggeredAtMs: number;
+  uiStartedAt: number;
+  lastMark: number;
+  monitorLabel: string;
+};
+
+function captureEpochNow(performanceNow = performance.now()) {
+  return performance.timeOrigin + performanceNow;
+}
+
+function logCaptureTiming(
+  trace: CaptureTimingTrace,
+  stage: string,
+  extra?: string
+) {
+  const now = performance.now();
+  const stageMs = now - trace.lastMark;
+  const uiTotalMs = now - trace.uiStartedAt;
+  const e2eMs = captureEpochNow(now) - trace.triggeredAtMs;
+  trace.lastMark = now;
+  const suffix = extra ? ` ${extra}` : "";
+  console.info(
+    `[xshot][capture][ui] capture_id=${trace.captureId} source=${trace.source} monitor=${trace.monitorLabel} stage=${stage} stage_ms=${stageMs.toFixed(1)} ui_total_ms=${uiTotalMs.toFixed(1)} e2e_ms=${e2eMs.toFixed(1)}${suffix}`
   );
+}
+
+function recordCaptureUiResult(
+  trace: CaptureTimingTrace,
+  status: "ready" | "failed",
+  stage: string,
+  error?: unknown
+) {
+  const now = performance.now();
+  void invoke("record_capture_ui_timing", {
+    captureId: trace.captureId,
+    source: trace.source,
+    monitorLabel: trace.monitorLabel,
+    status,
+    stage,
+    uiTotalMs: now - trace.uiStartedAt,
+    e2eMs: captureEpochNow(now) - trace.triggeredAtMs,
+    error: error === undefined ? null : String(error),
+  }).catch((recordError) => {
+    console.warn("Failed to record capture UI timing:", recordError);
+  });
 }
 
 function logLongCaptureDebug(label: string, payload?: Record<string, unknown>) {
@@ -3407,105 +3453,179 @@ export default function ScreenshotWindow() {
   }, []);
 
   useEffect(() => {
-    const unlisten = listen<CaptureStartPayload>("start-capture", async (event) => {
-      const startedAt = performance.now();
-      try {
-        const currentWindow = getCurrentWindow();
-        currentWindowLabelRef.current = currentWindow.label;
-        if (
-          event.payload?.label &&
-          event.payload.label !== currentWindowLabelRef.current
-        ) {
-          return;
+    const unlisten = listen<CaptureStartPayload>(
+      "start-capture",
+      async (event) => {
+        const uiStartedAt = performance.now();
+        let trace: CaptureTimingTrace | null = null;
+        let currentStage = "event_received";
+        try {
+          const currentWindow = getCurrentWindow();
+          currentWindowLabelRef.current = currentWindow.label;
+          if (
+            event.payload?.label &&
+            event.payload.label !== currentWindowLabelRef.current
+          ) {
+            return;
+          }
+          trace = {
+            captureId: event.payload.captureId,
+            source: event.payload.source,
+            triggeredAtMs: event.payload.triggeredAtMs,
+            uiStartedAt,
+            lastMark: uiStartedAt,
+            monitorLabel: currentWindowLabelRef.current,
+          };
+          logCaptureTiming(trace, "event_received");
+
+          currentStage = "unregister_long_capture_shortcuts";
+          await unregisterLongCaptureShortcuts();
+          logCaptureTiming(trace, currentStage);
+
+          currentStage = "stop_long_capture_native_mode";
+          await stopLongCaptureNativeMode();
+          logCaptureTiming(trace, currentStage);
+
+          currentStage = "window_hide";
+          await currentWindow.hide();
+          logCaptureTiming(trace, currentStage);
+
+          currentStage = "editor_reset";
+          resetEditor();
+          currentCaptureMonitorRef.current = event.payload ?? null;
+          logCaptureTiming(trace, currentStage);
+
+          currentStage = "capture_fullscreen_ipc";
+          const imageBytes = await invoke<ArrayBuffer>("capture_fullscreen", {
+            windowLabel: currentWindowLabelRef.current,
+            captureId: trace.captureId,
+            source: trace.source,
+          });
+          logCaptureTiming(
+            trace,
+            currentStage,
+            `bytes=${imageBytes.byteLength}`
+          );
+
+          currentStage = "source_image_decode";
+          const blob = new Blob([imageBytes], { type: "image/png" });
+          const url = URL.createObjectURL(blob);
+          sourceUrlRef.current = url;
+
+          const sourceImage = new Image();
+          sourceImage.src = url;
+          await sourceImage.decode();
+          sourceImageRef.current = sourceImage;
+          logCaptureTiming(
+            trace,
+            currentStage,
+            `${sourceImage.naturalWidth}x${sourceImage.naturalHeight}`
+          );
+
+          const canvas = fabricCanvasRef.current;
+          if (!canvas) {
+            throw new Error("Fabric canvas is not initialized");
+          }
+
+          currentStage = "fabric_background_from_url";
+          const img = await fabric.FabricImage.fromURL(url);
+          logCaptureTiming(trace, currentStage);
+
+          const scale = canvas.getWidth() / img.width;
+          scaleRef.current = scale;
+          currentStage = "list_capture_windows_ipc";
+          const captureWindows = await invoke<RawCaptureWindowRegion[]>(
+            "list_capture_windows",
+            {
+              windowLabel: currentWindowLabelRef.current,
+              captureId: trace.captureId,
+              source: trace.source,
+            }
+          ).catch((error) => {
+            console.warn("Failed to list capture windows:", error);
+            return [];
+          });
+          logCaptureTiming(
+            trace,
+            currentStage,
+            `regions=${captureWindows.length}`
+          );
+
+          currentStage = "map_capture_windows";
+          windowRegionsRef.current = mapCaptureWindowsToCanvas(
+            captureWindows,
+            canvas
+          );
+          logCaptureTiming(trace, currentStage);
+
+          currentStage = "background_and_mask_add";
+          img.set({
+            left: 0,
+            top: 0,
+            scaleX: scale,
+            scaleY: scale,
+            selectable: false,
+            evented: false,
+          });
+          bgImgRef.current = img;
+          canvas.add(img);
+
+          const mask = new fabric.Rect({
+            left: 0,
+            top: 0,
+            width: canvas.getWidth(),
+            height: canvas.getHeight(),
+            fill: "rgba(0, 0, 0, 0.52)",
+            selectable: false,
+            evented: false,
+          });
+          maskRef.current = mask;
+          canvas.add(mask);
+          logCaptureTiming(trace, currentStage);
+
+          currentStage = "fabric_selection_from_url";
+          const selectionImg = await fabric.FabricImage.fromURL(url);
+          logCaptureTiming(trace, currentStage);
+          selectionImg.set({
+            left: 0,
+            top: 0,
+            scaleX: scale,
+            scaleY: scale,
+            selectable: false,
+            evented: false,
+            visible: false,
+            stroke: "#1677ff",
+            strokeWidth: 2 / scale,
+          });
+          selectionImgRef.current = selectionImg;
+          canvas.add(selectionImg);
+
+          currentStage = "canvas_render_request";
+          cursorManager.setTool(ToolType.Selection);
+          canvas.requestRenderAll();
+          logCaptureTiming(trace, currentStage);
+
+          currentStage = "window_show";
+          await currentWindow.show();
+          logCaptureTiming(trace, currentStage);
+
+          currentStage = "window_focus";
+          await currentWindow.setFocus();
+          logCaptureTiming(trace, currentStage);
+
+          currentStage = "ready_for_selection";
+          await waitForNextPaint();
+          logCaptureTiming(trace, currentStage);
+          recordCaptureUiResult(trace, "ready", currentStage);
+        } catch (error) {
+          if (trace) {
+            logCaptureTiming(trace, "failed", `failed_stage=${currentStage}`);
+            recordCaptureUiResult(trace, "failed", currentStage, error);
+          }
+          console.error("Failed to start capture:", error);
         }
-        await unregisterLongCaptureShortcuts();
-        await stopLongCaptureNativeMode();
-        await currentWindow.hide();
-        resetEditor();
-        currentCaptureMonitorRef.current = event.payload ?? null;
-        logCaptureTiming(startedAt, "window hidden");
-
-        const imageBytes = await invoke<ArrayBuffer>("capture_fullscreen", {
-          windowLabel: currentWindowLabelRef.current,
-        });
-        logCaptureTiming(startedAt, "screen captured");
-        const blob = new Blob([imageBytes], { type: "image/png" });
-        const url = URL.createObjectURL(blob);
-        sourceUrlRef.current = url;
-
-        const sourceImage = new Image();
-        sourceImage.src = url;
-        await sourceImage.decode();
-        sourceImageRef.current = sourceImage;
-        logCaptureTiming(startedAt, "source image decoded");
-
-        const canvas = fabricCanvasRef.current;
-        if (!canvas) return;
-
-        const img = await fabric.FabricImage.fromURL(url);
-        const scale = canvas.getWidth() / img.width;
-        scaleRef.current = scale;
-        const captureWindows = await invoke<RawCaptureWindowRegion[]>(
-          "list_capture_windows",
-          { windowLabel: currentWindowLabelRef.current }
-        ).catch((error) => {
-          console.warn("Failed to list capture windows:", error);
-          return [];
-        });
-        windowRegionsRef.current = mapCaptureWindowsToCanvas(
-          captureWindows,
-          canvas
-        );
-
-        img.set({
-          left: 0,
-          top: 0,
-          scaleX: scale,
-          scaleY: scale,
-          selectable: false,
-          evented: false,
-        });
-        bgImgRef.current = img;
-        canvas.add(img);
-
-        const mask = new fabric.Rect({
-          left: 0,
-          top: 0,
-          width: canvas.getWidth(),
-          height: canvas.getHeight(),
-          fill: "rgba(0, 0, 0, 0.52)",
-          selectable: false,
-          evented: false,
-        });
-        maskRef.current = mask;
-        canvas.add(mask);
-
-        const selectionImg = await fabric.FabricImage.fromURL(url);
-        logCaptureTiming(startedAt, "fabric images and windows ready");
-        selectionImg.set({
-          left: 0,
-          top: 0,
-          scaleX: scale,
-          scaleY: scale,
-          selectable: false,
-          evented: false,
-          visible: false,
-          stroke: "#1677ff",
-          strokeWidth: 2 / scale,
-        });
-        selectionImgRef.current = selectionImg;
-        canvas.add(selectionImg);
-
-        cursorManager.setTool(ToolType.Selection);
-        canvas.requestRenderAll();
-
-        await currentWindow.show();
-        await currentWindow.setFocus();
-        logCaptureTiming(startedAt, "shown");
-      } catch (error) {
-        console.error("Failed to start capture:", error);
       }
-    });
+    );
 
     return () => {
       unlisten.then((dispose) => dispose());

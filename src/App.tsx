@@ -510,7 +510,7 @@ function App() {
           <button
             className="capture-button"
             type="button"
-            onClick={() => startCapture()}
+            onClick={() => startCapture("settings-button")}
             title={t("settings.captureTitle")}
           >
             <Crosshair size={18} />
