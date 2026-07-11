@@ -1,6 +1,6 @@
 #[cfg(not(target_os = "macos"))]
 use image::ImageEncoder;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use tauri::menu::{Menu, MenuItem};
@@ -10,7 +10,9 @@ use tauri::{
     WebviewWindowBuilder,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use xcap::{Monitor, Window};
+use xcap::Monitor;
+#[cfg(not(target_os = "macos"))]
+use xcap::Window;
 
 mod ocr;
 mod translation;
@@ -31,7 +33,7 @@ struct CaptureMonitor {
     name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct CaptureWindowRegion {
     id: u32,
     pid: u32,
@@ -82,6 +84,21 @@ struct PinWindowStore(Mutex<HashMap<String, PinWindowPayload>>);
 #[derive(Default)]
 struct PreparedCaptureStore(Mutex<HashMap<(String, String), Vec<u8>>>);
 
+#[derive(Default)]
+struct PreparedCaptureWindowStore(Mutex<HashMap<(String, String), Vec<CaptureWindowRegion>>>);
+
+struct CaptureWindowSnapshot {
+    id: u32,
+    pid: u32,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    is_focused: bool,
+    title: String,
+    app_name: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CaptureStartPayload {
@@ -90,6 +107,19 @@ struct CaptureStartPayload {
     capture_id: String,
     source: String,
     triggered_at_ms: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptureUiTiming {
+    capture_id: String,
+    source: String,
+    monitor_label: String,
+    status: String,
+    stage: String,
+    ui_total_ms: f64,
+    e2e_ms: f64,
+    error: Option<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -403,6 +433,27 @@ fn log_capture_stage(
     );
 }
 
+fn log_capture_stage_duration(
+    capture_id: &str,
+    source: &str,
+    triggered_at_ms: f64,
+    total: std::time::Instant,
+    stage_ms: f64,
+    stage: &str,
+    extra: &str,
+) {
+    println!(
+        "[xshot][capture][rust] capture_id={} source={} stage={} stage_ms={:.1} rust_total_ms={:.1} e2e_ms={:.1}{}",
+        capture_id,
+        source,
+        stage,
+        stage_ms,
+        total.elapsed().as_secs_f64() * 1000.0,
+        unix_epoch_ms() - triggered_at_ms,
+        extra,
+    );
+}
+
 fn log_capture_failure(
     capture_id: &str,
     source: &str,
@@ -679,36 +730,110 @@ async fn start_capture(
         &format!(" count={}", monitors.len()),
     );
 
+    let window_monitors = monitors.clone();
+    let window_regions_handle = std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let result = capture_window_regions(&window_monitors);
+        (result, started.elapsed())
+    });
+
+    let capture_handles = monitors
+        .iter()
+        .cloned()
+        .map(|monitor| {
+            let capture_id = capture_id.clone();
+            let source = source.clone();
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                let result = capture_monitor_image(&monitor, &capture_id, &source);
+                (monitor, result, started.elapsed())
+            })
+        })
+        .collect::<Vec<_>>();
+
     let mut prepared = HashMap::new();
-    for monitor in &monitors {
-        let stage = std::time::Instant::now();
-        let bytes = match capture_monitor_image(monitor, &capture_id, &source) {
-            Ok(bytes) => bytes,
-            Err(error) => {
+    for handle in capture_handles {
+        let (monitor, result, elapsed) = match handle.join() {
+            Ok(result) => result,
+            Err(_) => {
+                let error = "Capture monitor worker panicked".to_string();
                 log_capture_failure(
                     &capture_id,
                     &source,
                     triggered_at_ms,
                     total,
-                    stage,
-                    "capture_monitor_image",
+                    total,
+                    "capture_monitor_image_parallel",
                     &error,
+                );
+                return Err(error);
+            }
+        };
+        let bytes = match result {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                log_capture_stage_duration(
+                    &capture_id,
+                    &source,
+                    triggered_at_ms,
+                    total,
+                    elapsed.as_secs_f64() * 1000.0,
+                    "capture_monitor_image_failed",
+                    &format!(" monitor={} error={:?}", monitor.label, error),
                 );
                 return Err(error);
             }
         };
         let size = bytes.len();
         prepared.insert((capture_id.clone(), monitor.label.clone()), bytes);
-        log_capture_stage(
+        log_capture_stage_duration(
             &capture_id,
             &source,
             triggered_at_ms,
             total,
-            stage,
-            "capture_monitor_image",
+            elapsed.as_secs_f64() * 1000.0,
+            "capture_monitor_image_parallel",
             &format!(" monitor={} bytes={}", monitor.label, size),
         );
     }
+
+    let (window_regions_result, window_regions_elapsed) = match window_regions_handle.join() {
+        Ok(result) => result,
+        Err(_) => (
+            Err("Capture window snapshot worker panicked".to_string()),
+            std::time::Duration::ZERO,
+        ),
+    };
+    let prepared_window_regions = match window_regions_result {
+        Ok(regions) => {
+            let region_count = regions.values().map(Vec::len).sum::<usize>();
+            log_capture_stage_duration(
+                &capture_id,
+                &source,
+                triggered_at_ms,
+                total,
+                window_regions_elapsed.as_secs_f64() * 1000.0,
+                "capture_window_snapshot",
+                &format!(" monitors={} regions={}", regions.len(), region_count),
+            );
+            regions
+        }
+        Err(error) => {
+            log_capture_stage_duration(
+                &capture_id,
+                &source,
+                triggered_at_ms,
+                total,
+                window_regions_elapsed.as_secs_f64() * 1000.0,
+                "capture_window_snapshot_failed",
+                &format!(" error={:?}", error),
+            );
+            monitors
+                .iter()
+                .map(|monitor| (monitor.label.clone(), Vec::new()))
+                .collect()
+        }
+    };
 
     let stage = std::time::Instant::now();
     {
@@ -738,6 +863,29 @@ async fn start_capture(
         total,
         stage,
         "store_prepared_captures",
+        "",
+    );
+
+    let stage = std::time::Instant::now();
+    {
+        let store = app.state::<PreparedCaptureWindowStore>();
+        let mut store = store
+            .0
+            .lock()
+            .map_err(|_| "Failed to lock prepared capture window store".to_string())?;
+        store.extend(
+            prepared_window_regions
+                .into_iter()
+                .map(|(label, regions)| ((capture_id.clone(), label), regions)),
+        );
+    }
+    log_capture_stage(
+        &capture_id,
+        &source,
+        triggered_at_ms,
+        total,
+        stage,
+        "store_prepared_capture_windows",
         "",
     );
 
@@ -813,6 +961,10 @@ async fn finish_capture(app: AppHandle) -> Result<(), String> {
     {
         let store = app.state::<PreparedCaptureStore>();
         let _ = store.0.lock().map(|mut captures| captures.clear());
+    }
+    {
+        let store = app.state::<PreparedCaptureWindowStore>();
+        let _ = store.0.lock().map(|mut windows| windows.clear());
     }
 
     hide_screenshot_windows(&app)
@@ -966,7 +1118,7 @@ async fn capture_fullscreen(
             bytes.len(),
             start_time.elapsed().as_secs_f64() * 1000.0,
         );
-        return Ok(tauri::ipc::Response::new(bytes));
+        Ok(tauri::ipc::Response::new(bytes))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1243,29 +1395,125 @@ async fn capture_screen_rect_below_screenshot_window(
     }
 }
 
-#[tauri::command]
-async fn list_capture_windows(
-    window_label: Option<String>,
-    capture_id: Option<String>,
-    source: Option<String>,
-) -> Result<Vec<CaptureWindowRegion>, String> {
-    let capture_id = capture_id.unwrap_or_else(|| "legacy".to_string());
-    let source = source.unwrap_or_else(|| "unknown".to_string());
-    let total = std::time::Instant::now();
-    let monitors = capture_monitors()?;
-    let target_monitor = window_label
-        .as_deref()
-        .and_then(|label| monitors.iter().find(|monitor| monitor.label == label))
-        .or_else(|| monitors.iter().find(|monitor| monitor.is_primary))
-        .or_else(|| monitors.first())
-        .ok_or("No monitor found")?;
+#[cfg(target_os = "macos")]
+fn capture_window_snapshots() -> Result<Vec<CaptureWindowSnapshot>, String> {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_core_foundation::{CFDictionary, CFNumber, CFNumberType, CFString, CGRect};
+    use objc2_core_graphics::{
+        CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo, CGWindowListOption,
+    };
+    use std::ffi::c_void;
 
-    let monitor_x = target_monitor.x.round() as i32;
-    let monitor_y = target_monitor.y.round() as i32;
-    let monitor_width = target_monitor.width.round().max(1.0) as i32;
-    let monitor_height = target_monitor.height.round().max(1.0) as i32;
-    let monitor_right = monitor_x + monitor_width;
-    let monitor_bottom = monitor_y + monitor_height;
+    unsafe fn dictionary_value(dictionary: &CFDictionary, key: &str) -> Option<*const c_void> {
+        let key = CFString::from_str(key);
+        let value = dictionary.value((&*key as *const CFString).cast());
+        (!value.is_null()).then_some(value)
+    }
+
+    unsafe fn number_i32(dictionary: &CFDictionary, key: &str) -> Option<i32> {
+        let number = dictionary_value(dictionary, key)? as *const CFNumber;
+        let mut value = 0_i32;
+        (*number)
+            .value(
+                CFNumberType::IntType,
+                (&mut value as *mut i32).cast::<c_void>(),
+            )
+            .then_some(value)
+    }
+
+    unsafe fn string_value(dictionary: &CFDictionary, key: &str) -> Option<String> {
+        let value = dictionary_value(dictionary, key)? as *const CFString;
+        Some((*value).to_string())
+    }
+
+    unsafe fn bounds(dictionary: &CFDictionary) -> Option<CGRect> {
+        let bounds = dictionary_value(dictionary, "kCGWindowBounds")? as *const CFDictionary;
+        let mut rect = CGRect::default();
+        CGRectMakeWithDictionaryRepresentation(Some(&*bounds), &mut rect).then_some(rect)
+    }
+
+    let active_pid = NSWorkspace::sharedWorkspace()
+        .frontmostApplication()
+        .map(|application| application.processIdentifier() as u32);
+
+    let window_info = CGWindowListCopyWindowInfo(
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+        0,
+    )
+    .ok_or("Failed to get macOS window snapshot")?;
+
+    let mut snapshots = Vec::with_capacity(window_info.count().max(0) as usize);
+    for index in 0..window_info.count() {
+        let dictionary = unsafe { window_info.value_at_index(index) as *const CFDictionary };
+        if dictionary.is_null() {
+            continue;
+        }
+        let dictionary = unsafe { &*dictionary };
+        let Some(id) = (unsafe { number_i32(dictionary, "kCGWindowNumber") }) else {
+            continue;
+        };
+        if unsafe { number_i32(dictionary, "kCGWindowSharingState") } == Some(0) {
+            continue;
+        }
+        let Some(rect) = (unsafe { bounds(dictionary) }) else {
+            continue;
+        };
+        let pid = unsafe { number_i32(dictionary, "kCGWindowOwnerPID") }.unwrap_or_default() as u32;
+        let app_name =
+            unsafe { string_value(dictionary, "kCGWindowOwnerName") }.unwrap_or_default();
+        let title = unsafe { string_value(dictionary, "kCGWindowName") }.unwrap_or_default();
+
+        snapshots.push(CaptureWindowSnapshot {
+            id: id as u32,
+            pid,
+            x: rect.origin.x.round() as i32,
+            y: rect.origin.y.round() as i32,
+            width: rect.size.width.round() as i32,
+            height: rect.size.height.round() as i32,
+            is_focused: active_pid == Some(pid),
+            title,
+            app_name,
+        });
+    }
+    Ok(snapshots)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn capture_window_snapshots() -> Result<Vec<CaptureWindowSnapshot>, String> {
+    let windows = Window::all().map_err(|error| error.to_string())?;
+    let mut snapshots = Vec::with_capacity(windows.len());
+    for window in windows {
+        if window.is_minimized().unwrap_or(false) {
+            continue;
+        }
+        let (Ok(id), Ok(x), Ok(y), Ok(width), Ok(height)) = (
+            window.id(),
+            window.x(),
+            window.y(),
+            window.width(),
+            window.height(),
+        ) else {
+            continue;
+        };
+        snapshots.push(CaptureWindowSnapshot {
+            id,
+            pid: window.pid().unwrap_or_default(),
+            x,
+            y,
+            width: width as i32,
+            height: height as i32,
+            is_focused: window.is_focused().unwrap_or(false),
+            title: window.title().unwrap_or_default(),
+            app_name: window.app_name().unwrap_or_default(),
+        });
+    }
+    Ok(snapshots)
+}
+
+fn capture_window_regions(
+    monitors: &[CaptureMonitor],
+) -> Result<HashMap<String, Vec<CaptureWindowRegion>>, String> {
+    let windows = capture_window_snapshots()?;
     let current_pid = std::process::id();
     let ignored_apps = [
         "Dock",
@@ -1278,102 +1526,114 @@ async fn list_capture_windows(
         "控制中心",
         "通知中心",
     ];
+    let mut regions_by_monitor = HashMap::with_capacity(monitors.len());
 
-    let enum_start = std::time::Instant::now();
-    let windows = Window::all().map_err(|e| e.to_string())?;
-    println!(
-        "[xshot][capture][rust] capture_id={} source={} stage=list_capture_windows_enum count={} elapsed_ms={:.1}",
-        capture_id,
-        source,
-        windows.len(),
-        enum_start.elapsed().as_secs_f64() * 1000.0,
-    );
-    let mut regions = Vec::new();
+    for monitor in monitors {
+        let monitor_x = monitor.x.round() as i32;
+        let monitor_y = monitor.y.round() as i32;
+        let monitor_width = monitor.width.round().max(1.0) as i32;
+        let monitor_height = monitor.height.round().max(1.0) as i32;
+        let monitor_right = monitor_x + monitor_width;
+        let monitor_bottom = monitor_y + monitor_height;
+        let mut regions = Vec::new();
 
-    for window in windows {
-        let id = match window.id() {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
-        let pid = window.pid().unwrap_or_default();
-        if pid == current_pid {
-            continue;
+        for window in &windows {
+            if window.pid == current_pid
+                || window.width < 40
+                || window.height < 40
+                || ignored_apps
+                    .iter()
+                    .any(|ignored| window.app_name.eq_ignore_ascii_case(ignored))
+            {
+                continue;
+            }
+
+            let left = window.x.max(monitor_x);
+            let top = window.y.max(monitor_y);
+            let right = (window.x + window.width).min(monitor_right);
+            let bottom = (window.y + window.height).min(monitor_bottom);
+            let clipped_width = right - left;
+            let clipped_height = bottom - top;
+            if clipped_width < 40 || clipped_height < 40 {
+                continue;
+            }
+
+            let monitor_area = monitor_width as f64 * monitor_height as f64;
+            let window_area = clipped_width as f64 * clipped_height as f64;
+            let covers_whole_monitor = window_area / monitor_area > 0.92
+                && clipped_width as f64 >= monitor_width as f64 * 0.96
+                && clipped_height as f64 >= monitor_height as f64 * 0.92;
+            let is_overlay_candidate =
+                covers_whole_monitor && window.title.trim().is_empty() && !window.is_focused;
+
+            regions.push(CaptureWindowRegion {
+                id: window.id,
+                pid: window.pid,
+                x: (left - monitor_x) as f64,
+                y: (top - monitor_y) as f64,
+                width: clipped_width as f64,
+                height: clipped_height as f64,
+                monitor_width: monitor_width as f64,
+                monitor_height: monitor_height as f64,
+                is_fullscreen_like: covers_whole_monitor,
+                is_overlay_candidate,
+                is_focused: window.is_focused,
+                title: window.title.clone(),
+                app_name: window.app_name.clone(),
+            });
         }
-        if window.is_minimized().unwrap_or(false) {
-            continue;
-        }
-
-        let app_name = window.app_name().unwrap_or_default();
-        let title = window.title().unwrap_or_default();
-        if ignored_apps
-            .iter()
-            .any(|ignored| app_name.eq_ignore_ascii_case(ignored))
-        {
-            continue;
-        }
-
-        let x = match window.x() {
-            Ok(x) => x,
-            Err(_) => continue,
-        };
-        let y = match window.y() {
-            Ok(y) => y,
-            Err(_) => continue,
-        };
-        let width = match window.width() {
-            Ok(width) => width as i32,
-            Err(_) => continue,
-        };
-        let height = match window.height() {
-            Ok(height) => height as i32,
-            Err(_) => continue,
-        };
-
-        if width < 40 || height < 40 {
-            continue;
-        }
-
-        let left = x.max(monitor_x);
-        let top = y.max(monitor_y);
-        let right = (x + width).min(monitor_right);
-        let bottom = (y + height).min(monitor_bottom);
-        let clipped_width = right - left;
-        let clipped_height = bottom - top;
-
-        if clipped_width < 40 || clipped_height < 40 {
-            continue;
-        }
-
-        let monitor_area = monitor_width as f64 * monitor_height as f64;
-        let window_area = clipped_width as f64 * clipped_height as f64;
-        let covers_whole_monitor = window_area / monitor_area > 0.92
-            && clipped_width as f64 >= monitor_width as f64 * 0.96
-            && clipped_height as f64 >= monitor_height as f64 * 0.92;
-        let is_focused = window.is_focused().unwrap_or(false);
-        let is_overlay_candidate = covers_whole_monitor && title.trim().is_empty() && !is_focused;
-
-        regions.push(CaptureWindowRegion {
-            id,
-            pid,
-            x: (left - monitor_x) as f64,
-            y: (top - monitor_y) as f64,
-            width: clipped_width as f64,
-            height: clipped_height as f64,
-            monitor_width: monitor_width as f64,
-            monitor_height: monitor_height as f64,
-            is_fullscreen_like: covers_whole_monitor,
-            is_overlay_candidate,
-            is_focused,
-            title,
-            app_name,
-        });
+        regions_by_monitor.insert(monitor.label.clone(), regions);
     }
 
+    Ok(regions_by_monitor)
+}
+
+#[tauri::command]
+async fn list_capture_windows(
+    app: AppHandle,
+    window_label: Option<String>,
+    capture_id: Option<String>,
+    source: Option<String>,
+) -> Result<Vec<CaptureWindowRegion>, String> {
+    let capture_id = capture_id.unwrap_or_else(|| "legacy".to_string());
+    let source = source.unwrap_or_else(|| "unknown".to_string());
+    let monitors = capture_monitors()?;
+    let target_label = window_label
+        .or_else(|| {
+            monitors
+                .iter()
+                .find(|monitor| monitor.is_primary)
+                .or_else(|| monitors.first())
+                .map(|monitor| monitor.label.clone())
+        })
+        .ok_or("No monitor found")?;
+    let key = (capture_id.clone(), target_label.clone());
+
+    if let Some(regions) = app
+        .state::<PreparedCaptureWindowStore>()
+        .0
+        .lock()
+        .map_err(|_| "Failed to lock prepared capture window store".to_string())?
+        .remove(&key)
+    {
+        println!(
+            "[xshot][capture][rust] capture_id={} source={} stage=list_capture_windows_prepared_hit monitor={} regions={}",
+            capture_id,
+            source,
+            target_label,
+            regions.len(),
+        );
+        return Ok(regions);
+    }
+
+    let total = std::time::Instant::now();
+    let mut regions_by_monitor = capture_window_regions(&monitors)?;
+    let regions = regions_by_monitor.remove(&target_label).unwrap_or_default();
     println!(
-        "[xshot][capture][rust] capture_id={} source={} stage=list_capture_windows_done monitor={} regions={} elapsed_ms={:.1}",
+        "[xshot][capture][rust] capture_id={} source={} stage=list_capture_windows_fallback monitor={} regions={} elapsed_ms={:.1}",
         capture_id,
         source,
-        target_monitor.label,
+        target_label,
         regions.len(),
         total.elapsed().as_secs_f64() * 1000.0,
     );
@@ -1381,26 +1641,17 @@ async fn list_capture_windows(
 }
 
 #[tauri::command]
-fn record_capture_ui_timing(
-    capture_id: String,
-    source: String,
-    monitor_label: String,
-    status: String,
-    stage: String,
-    ui_total_ms: f64,
-    e2e_ms: f64,
-    error: Option<String>,
-) {
+fn record_capture_ui_timing(timing: CaptureUiTiming) {
     println!(
         "[xshot][capture][ready] capture_id={} source={} monitor={} status={} stage={} ui_total_ms={:.1} e2e_ms={:.1} error={:?}",
-        capture_id,
-        source,
-        monitor_label,
-        status,
-        stage,
-        ui_total_ms,
-        e2e_ms,
-        error,
+        timing.capture_id,
+        timing.source,
+        timing.monitor_label,
+        timing.status,
+        timing.stage,
+        timing.ui_total_ms,
+        timing.e2e_ms,
+        timing.error,
     );
 }
 
@@ -2176,6 +2427,7 @@ pub fn run() {
             let _ = std::fs::remove_dir_all(pin_window_temp_dir());
             app.manage(PinWindowStore::default());
             app.manage(PreparedCaptureStore::default());
+            app.manage(PreparedCaptureWindowStore::default());
             #[cfg(target_os = "macos")]
             app.manage(CaptureFocusFollowerState::default());
 

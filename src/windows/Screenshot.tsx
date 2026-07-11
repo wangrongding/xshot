@@ -342,14 +342,16 @@ function recordCaptureUiResult(
 ) {
   const now = performance.now();
   void invoke("record_capture_ui_timing", {
-    captureId: trace.captureId,
-    source: trace.source,
-    monitorLabel: trace.monitorLabel,
-    status,
-    stage,
-    uiTotalMs: now - trace.uiStartedAt,
-    e2eMs: captureEpochNow(now) - trace.triggeredAtMs,
-    error: error === undefined ? null : String(error),
+    timing: {
+      captureId: trace.captureId,
+      source: trace.source,
+      monitorLabel: trace.monitorLabel,
+      status,
+      stage,
+      uiTotalMs: now - trace.uiStartedAt,
+      e2eMs: captureEpochNow(now) - trace.triggeredAtMs,
+      error: error === undefined ? null : String(error),
+    },
   }).catch((recordError) => {
     console.warn("Failed to record capture UI timing:", recordError);
   });
@@ -3495,6 +3497,18 @@ export default function ScreenshotWindow() {
           currentCaptureMonitorRef.current = event.payload ?? null;
           logCaptureTiming(trace, currentStage);
 
+          const captureWindowsPromise = invoke<RawCaptureWindowRegion[]>(
+            "list_capture_windows",
+            {
+              windowLabel: currentWindowLabelRef.current,
+              captureId: trace.captureId,
+              source: trace.source,
+            }
+          ).catch((error) => {
+            console.warn("Failed to list capture windows:", error);
+            return [];
+          });
+
           currentStage = "capture_fullscreen_ipc";
           const imageBytes = await invoke<ArrayBuffer>("capture_fullscreen", {
             windowLabel: currentWindowLabelRef.current,
@@ -3533,30 +3547,6 @@ export default function ScreenshotWindow() {
 
           const scale = canvas.getWidth() / img.width;
           scaleRef.current = scale;
-          currentStage = "list_capture_windows_ipc";
-          const captureWindows = await invoke<RawCaptureWindowRegion[]>(
-            "list_capture_windows",
-            {
-              windowLabel: currentWindowLabelRef.current,
-              captureId: trace.captureId,
-              source: trace.source,
-            }
-          ).catch((error) => {
-            console.warn("Failed to list capture windows:", error);
-            return [];
-          });
-          logCaptureTiming(
-            trace,
-            currentStage,
-            `regions=${captureWindows.length}`
-          );
-
-          currentStage = "map_capture_windows";
-          windowRegionsRef.current = mapCaptureWindowsToCanvas(
-            captureWindows,
-            canvas
-          );
-          logCaptureTiming(trace, currentStage);
 
           currentStage = "background_and_mask_add";
           img.set({
@@ -3617,6 +3607,19 @@ export default function ScreenshotWindow() {
           await waitForNextPaint();
           logCaptureTiming(trace, currentStage);
           recordCaptureUiResult(trace, "ready", currentStage);
+
+          const readyTrace = trace;
+          void captureWindowsPromise.then((captureWindows) => {
+            windowRegionsRef.current = mapCaptureWindowsToCanvas(
+              captureWindows,
+              canvas
+            );
+            logCaptureTiming(
+              readyTrace,
+              "window_regions_ready",
+              `regions=${captureWindows.length}`
+            );
+          });
         } catch (error) {
           if (trace) {
             logCaptureTiming(trace, "failed", `failed_stage=${currentStage}`);
